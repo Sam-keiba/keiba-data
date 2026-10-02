@@ -10,6 +10,7 @@
   uv run keiba-data cushion                       クッション値・含水率をJRA公式PDFから取り込む
   uv run keiba-data pedigree                      馬の父・母・母の父をJRA公式から取り込む（種牡馬分析の土台）
   uv run keiba-data bloodline                     5代血統表を取り込む（血統クロス分析の土台）
+  uv run keiba-data bloodline-local               手元のデータだけで5代血統表を広げる（ネットにアクセスしない）
   uv run keiba-data sire-fetch                    種牡馬リーディング（AEI）をJRA公式から取り込む
   uv run keiba-data target-import                Targetから書き出したCSVを取り込む（足りない行と空欄だけを本体へ）
   uv run keiba-data publish                       閲覧用DBを作ってGitHubのリリースへ上げる（クラウド版に反映）
@@ -28,7 +29,7 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from keiba_data import config, cushion, db, publish as publish_module, target_import
+from keiba_data import bloodline_local, config, cushion, db, publish as publish_module, sire_keys, target_import
 from keiba_data.html_store import HtmlStore
 from keiba_data.http import BlockedError, PoliteSession, RequestBudgetExceeded
 from keiba_data.scrapers import jra_odds, jra_sire
@@ -125,6 +126,11 @@ def _run(args: argparse.Namespace) -> int:
         db.finish_run(
             conn, run_id, status, session.n_requests, updater.n_races_saved, updater.n_warnings, message
         )
+    # 新しく入った馬に、父・母の父の名寄せキーを付ける（名前で引くだけなので軽い）
+    if args.command in ("update", "backfill", "reparse", "pedigree"):
+        filled = sire_keys.fill_missing_sire_keys(conn)
+        if filled:
+            logger.info("名寄せキーを%d件付けました", filled)
 
     logger.info(
         "%s 終了(%s): 保存%d件 / リクエスト%d回 / 警告%d件",
@@ -317,6 +323,24 @@ def _target_import(args: argparse.Namespace) -> int:
         conn.close()
 
 
+def _bloodline_local(args: argparse.Namespace) -> int:
+    """手元のデータだけで5代血統表を広げる（netkeibaの血統表＋Targetのhorse_data）。ネットにはアクセスしない。"""
+    conn = db.connect(config.DB_PATH)
+    try:
+        if args.check:
+            bloodline_local.holdout_check(conn)
+            return EXIT_OK
+        run_id = None if args.dry_run else db.start_run(conn, "bloodline-local", args.raw_args)
+        result = bloodline_local.rebuild(conn, dry_run=args.dry_run)
+        message = f"{result.horses:,}頭 平均{result.cells / max(result.horses, 1):.1f}マス"
+        if run_id is not None:
+            db.finish_run(conn, run_id, "success", 0, 0, 0, message)
+        logger.info("bloodline-local: %s%s", message, "（dry-run: DBは変更していません）" if args.dry_run else "")
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
 def _fetch_sire(updater: Updater, args: argparse.Namespace) -> None:
     """種牡馬リーディング（E・I＝AEI）をJRA公式から取り込む。
 
@@ -454,6 +478,10 @@ def _print_backfill_progress(conn) -> None:
         print(f"  {label:<26} [{_bar(done, total)}] {done:>6,}/{total:,} ({percent:4.1f}%) {left}")
         if remaining:
             print(f"  {'':<26}  続き: uv run {command} --max-requests 5000")
+    local, avg_cells = db.count_local_bloodline(conn)
+    if local:
+        print(f"  {'5代血統表（手元のデータで組んだもの）':<26} {local:,}頭 平均{avg_cells:.1f}/62マス"
+              "（作り直し: uv run keiba-data bloodline-local）")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -559,6 +587,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_fetch_options(p_bloodline)
     p_bloodline.set_defaults(func=_run)
+
+    p_bloodline_local = sub.add_parser(
+        "bloodline-local", help="手元のデータだけで5代血統表を広げる（netkeibaの血統表＋Targetのhorse_data。ネットにアクセスしない）")
+    p_bloodline_local.add_argument("--dry-run", action="store_true", help="DBを変えずに、頭数と平均マス数だけ出す")
+    p_bloodline_local.add_argument("--check", action="store_true",
+                                   help="netkeibaの血統表がある馬の1割を外して組み直し、一致率を出す（DBは変えない）")
+    p_bloodline_local.set_defaults(func=_bloodline_local)
 
     p_sire_fetch = sub.add_parser(
         "sire-fetch", help="種牡馬リーディング（E・I＝AEI）をJRA公式から取り込む")

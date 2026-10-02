@@ -36,7 +36,10 @@ CREATE TABLE IF NOT EXISTS races (
     winner_corner   TEXT,                 -- 勝ち馬のコーナー通過順位（JRA公式由来。開催の傾向表示に使う）
     fetched_at      TEXT NOT NULL,        -- 最初に保存した日時
     updated_at      TEXT NOT NULL,        -- 最後に保存した日時
-    source          TEXT NOT NULL DEFAULT 'scrape'  -- scrape=netkeiba/JRA公式 / target=Target（target-import）で作った行
+    source          TEXT NOT NULL DEFAULT 'scrape', -- scrape=netkeiba/JRA公式 / target=Target（target-import）で作った行
+    -- 回次・格・クラスの付記を落としたレース名（race_names.py）。'スプリンターズS' '3歳以上500万下'
+    -- Target由来は略称を2023年以降の同じレースの名前に寄せたもの。寄せられなかった略称は切れたまま
+    race_name_plain TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_races_date ON races(race_date);
 
@@ -55,7 +58,13 @@ CREATE TABLE IF NOT EXISTS horses (
     broodmare_sire_no  TEXT,              -- 母の父の血統登録番号
     trainer_name       TEXT,              -- 調教師名（詳細ページの表記）
     updated_at     TEXT NOT NULL,
-    source         TEXT NOT NULL DEFAULT 'scrape'  -- scrape / target（races.source と同じ）
+    source         TEXT NOT NULL DEFAULT 'scrape', -- scrape / target（races.source と同じ）
+    -- 父・母の父の名寄せキー（stallions.sire_key）。カナ・英字の表記ゆれがあっても同じ馬なら同じ値
+    sire_key           TEXT,
+    broodmare_sire_key TEXT,
+    -- 母の繁殖登録番号（Target の horse_data 由来）。同名の別馬（95組）があるので名前では束ねない。
+    -- horse_data に無い馬（1995年前後生まれ、書き出し後に入った新馬）は空
+    dam_key            TEXT
 );
 
 CREATE TABLE IF NOT EXISTS jockeys (
@@ -88,14 +97,20 @@ CREATE TABLE IF NOT EXISTS entries (
     kinryo       REAL,                    -- 斤量(kg)
     jockey_id    TEXT REFERENCES jockeys(jockey_id),
     trainer_id   TEXT REFERENCES trainers(trainer_id),
-    owner_id     TEXT REFERENCES owners(owner_id),
+    owner_id     TEXT REFERENCES owners(owner_id),   -- レース当時の馬主（netkeiba由来。2022年以前は空）
     horse_weight INTEGER,                 -- 馬体重(kg)
     weight_diff  INTEGER,                 -- 前走比増減(kg)
+    -- Targetを書き出した時点の馬主（target_horses.owner_code）。**レース当時ではない**
+    -- （2023年の走で約3%、転売された馬で owner_id と食い違う）。owner_id が空の走の代用に使う
+    owner_id_at_export TEXT REFERENCES owners(owner_id),
     PRIMARY KEY (race_id, umaban)
 );
 CREATE INDEX IF NOT EXISTS idx_entries_horse ON entries(horse_id);
 CREATE INDEX IF NOT EXISTS idx_entries_jockey ON entries(jockey_id);
 CREATE INDEX IF NOT EXISTS idx_entries_trainer ON entries(trainer_id);
+-- クラブ（馬主）ごとの集計用
+CREATE INDEX IF NOT EXISTS idx_entries_owner ON entries(owner_id);
+CREATE INDEX IF NOT EXISTS idx_entries_owner_export ON entries(owner_id_at_export);
 
 -- 結果・オッズ（entriesと1対1）
 CREATE TABLE IF NOT EXISTS results (
@@ -416,6 +431,9 @@ CREATE TABLE IF NOT EXISTS horse_ancestors (
     path        TEXT NOT NULL,
     generation  INTEGER NOT NULL,  -- 1〜5（path の長さ）
     ancestor_no TEXT NOT NULL,
+    -- netkeiba=netkeibaの血統表そのもの（1頭62マス） / local=手元のデータから組んだもの（`bloodline-local`。
+    -- マスが欠けることがある）。netkeiba で取り直すと local の行はその馬ごと置き換わる
+    source      TEXT NOT NULL DEFAULT 'netkeiba',
     PRIMARY KEY (horse_id, path)
 );
 -- 「この祖先を5代内に持つ馬」を引くための索引（血統クロス分析の主役）
@@ -423,12 +441,30 @@ CREATE INDEX IF NOT EXISTS idx_horse_ancestors_ancestor
     ON horse_ancestors(ancestor_no, generation);
 CREATE INDEX IF NOT EXISTS idx_pedigree_horses_name ON pedigree_horses(name);
 
+-- 種牡馬（父・母の父として出てくる馬）の名寄せ（sire_keys.py。target-import のたびに作り直す）。
+-- 同じ馬が「サンデーサイレンス」と「Sunday Silence」、国内の繁殖登録番号 1120001232 と
+-- 海外記録の 1140004339 に割れているのを、(番号, 名前) のつながりで1頭にまとめる。
+-- sire_key は国内の繁殖登録番号（無ければいちばん小さい番号）
+CREATE TABLE IF NOT EXISTS stallions (
+    sire_key TEXT PRIMARY KEY,
+    name     TEXT NOT NULL             -- 代表名（2023年以降の馬が使う表記＝JRAの表記を優先）
+);
+CREATE TABLE IF NOT EXISTS stallion_names (
+    name     TEXT PRIMARY KEY,         -- horses.sire / broodmare_sire に出てくる表記すべて
+    sire_key TEXT NOT NULL REFERENCES stallions(sire_key)
+);
+CREATE INDEX IF NOT EXISTS idx_horses_sire_key ON horses(sire_key);
+CREATE INDEX IF NOT EXISTS idx_horses_bms_key ON horses(broodmare_sire_key);
+CREATE INDEX IF NOT EXISTS idx_horses_dam_key ON horses(dam_key);
+
 
 -- ============================================================
 -- Target（TARGET frontier JV）から書き出したCSVの取り込み先（`keiba-data target-import`）。
 -- CSVを正規化しただけの「全列保存」の層で、PCI などTargetにしか無い指標はここにだけある。
 -- 本体（races/entries/results/horses/...）には、ここから足りない行と空欄だけを写す
--- （既存の値は上書きしない。埋めた欄は target_fills に残す）。
+-- （既存の値は上書きしない。埋めた欄は target_fills に残す）。ほかに、ここから作るもの:
+-- races.race_name_plain / entries.owner_id_at_export / stallions・horses.sire_key /
+-- horse_ancestors の source='local' の行（`bloodline-local`）。
 -- race_id / umaban / horse_id / jockey_id / trainer_id は本体と同じ体系（2023-01〜2026-09で全件一致を確認）。
 -- 元データは個人で使うためだけのもの。**閲覧用DBやgitに出さない。**
 -- ============================================================
@@ -595,6 +631,7 @@ CREATE TABLE IF NOT EXISTS target_horses (
     imported_at               TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_target_horses_sire_no ON target_horses(sire_breed_no);
+CREATE INDEX IF NOT EXISTS idx_target_horses_owner ON target_horses(owner_code);
 
 -- 収得賞金上位の兄弟（1頭最大5行）
 CREATE TABLE IF NOT EXISTS target_horse_siblings (

@@ -21,8 +21,12 @@ from keiba_data import config
 
 logger = logging.getLogger(__name__)
 
-# 閲覧では使わない表。**子から先に**並べる（外部キーの向きに合わせる）
-VIEWER_DROP = ("payouts", "fetch_log", "parse_warnings", "runs")
+# 閲覧では使わない表。**子から先に**並べる（外部キーの向きに合わせる）。
+# Target の取り込み層（target_*）は個人で使うためだけのもので、分析に要るもの（付記の無いレース名・
+# 書き出し時点の馬主・名寄せキー・母のキー）は本体の列に写してあるので出さない
+VIEWER_DROP = ("payouts", "fetch_log", "parse_warnings",
+               "target_horse_siblings", "target_runs", "target_races", "target_horses",
+               "target_fills", "target_import_files", "runs")
 
 RELEASE_TAG = "db"
 ASSET_NAME = "keiba-viewer.db.gz"

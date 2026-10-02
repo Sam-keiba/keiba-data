@@ -263,3 +263,28 @@ def test_migrate_adds_source_without_touching_rows(tmp_path):
     assert conn.execute("SELECT source FROM horses").fetchone()[0] == "scrape"
     db.init_db(conn)                       # 2回目も壊れない
     conn.close()
+
+
+def test_merge_derives_plain_name_export_owner_and_sire_keys(conn, datasets):
+    seed_existing(conn)
+    ti.load_files(conn, datasets)
+    ti.merge(conn)
+    race = conn.execute("SELECT race_name, race_name_plain FROM races").fetchone()
+    assert (race["race_name"], race["race_name_plain"]) == ("未勝利", "3歳未勝利")   # netkeiba と同じ書き方
+    # 書き出し時点の馬主は別の列に入り、レース当時の馬主（owner_id）は空のまま
+    rows = conn.execute("SELECT owner_id, owner_id_at_export FROM entries").fetchall()
+    assert [(r[0], r[1]) for r in rows] == [(None, "000123"), (None, "000123")]
+    # 英字（Target）とカナ（本体）の父が、同じ繁殖登録番号で1つのキーにまとまる
+    keys = conn.execute("SELECT DISTINCT sire_key FROM horses").fetchall()
+    assert [k[0] for k in keys] == ["1120000001"]
+    names = dict(conn.execute("SELECT name, sire_key FROM stallion_names"))
+    assert names["Foreign Sire"] == names["フォーリンサイアー"] == "1120000001"
+    assert conn.execute("SELECT name FROM stallions WHERE sire_key = '1120000001'").fetchone()[0] == "フォーリンサイアー"
+    # 母のキーは繁殖登録番号そのもの
+    assert [r[0] for r in conn.execute("SELECT DISTINCT dam_key FROM horses")] == ["1220000001"]
+
+
+def test_merge_dry_run_leaves_derived_columns_empty(conn, datasets):
+    ti.load_files(conn, datasets)
+    ti.merge(conn, dry_run=True)
+    assert counts(conn, "stallions", "stallion_names") == {"stallions": 0, "stallion_names": 0}

@@ -29,7 +29,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from keiba_data import config, db
+from keiba_data import config, db, race_names, sire_keys
 from keiba_data.race_id import decode_race_id
 
 logger = logging.getLogger(__name__)
@@ -800,6 +800,38 @@ def _merge_year(conn: sqlite3.Connection, year: str, stats: MergeStats, ts: str)
                 [core_result(t) for t in runs], {}, stats, ts)
 
 
+def _fill_export_owner(conn: sqlite3.Connection) -> int:
+    """entries.owner_id_at_export に、Targetを書き出した時点の馬主（target_horses.owner_code）を入れる。
+
+    レース当時の馬主（owner_id）には触らない。horse_data を書き出し直して馬主が変われば、それに合わせる。
+    """
+    sql = "(SELECT owner_code FROM target_horses t WHERE t.horse_id = entries.horse_id)"
+    with conn:
+        return conn.execute(f"UPDATE entries SET owner_id_at_export = {sql} "
+                            f"WHERE owner_id_at_export IS NOT {sql}").rowcount
+
+
+def _fill_dam_key(conn: sqlite3.Connection) -> int:
+    """horses.dam_key に母の繁殖登録番号（target_horses.dam_breed_no）を入れる。
+
+    母は1頭1番号で表記も1つだが、同じ名前の別の母がいるので、名寄せはせず番号そのものをキーにする。
+    """
+    sql = "(SELECT NULLIF(dam_breed_no, '') FROM target_horses t WHERE t.horse_id = horses.horse_id)"
+    with conn:
+        return conn.execute(f"UPDATE horses SET dam_key = {sql} WHERE dam_key IS NOT {sql}").rowcount
+
+
+def derive(conn: sqlite3.Connection) -> None:
+    """target_* と本体から作り直すもの（付記の無いレース名・書き出し時点の馬主・母のキー・種牡馬の名寄せ）。"""
+    with conn:
+        race_names.refresh_target_plain_names(conn)
+    n = _fill_export_owner(conn)
+    logger.info("書き出し時点の馬主（entries.owner_id_at_export）: %s行を更新", f"{n:,}")
+    n = _fill_dam_key(conn)
+    logger.info("母のキー（horses.dam_key）: %s頭を更新", f"{n:,}")
+    sire_keys.rebuild_sire_keys(conn)
+
+
 def merge(conn: sqlite3.Connection, *, dry_run: bool = False) -> MergeStats:
     """target_* から本体へ写す。何度流しても結果は同じ（2回目は何も変わらない）。
 
@@ -831,4 +863,6 @@ def merge(conn: sqlite3.Connection, *, dry_run: bool = False) -> MergeStats:
             conn.rollback()
     for (table, col), n in sorted(stats.filled.items()):
         logger.info("空欄を埋めた: %s.%s %s件", table, col, f"{n:,}")
+    if not dry_run:
+        derive(conn)
     return stats

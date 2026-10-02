@@ -1,4 +1,4 @@
-from keiba_data import db
+from keiba_data import db, race_names
 from keiba_data.scrapers.race_result import parse_race_result
 from tests.conftest import load_fixture
 
@@ -195,6 +195,8 @@ def test_save_jra_race(conn):
     assert counts["entries"] == counts["results"] == 0  # 馬ごとの結果は入れない
     row = conn.execute("SELECT * FROM races WHERE race_id = '202606040601'").fetchone()
     assert (row["surface"], row["distance_m"], row["class_condition"]) == ("dirt", 1800, "未勝利")
+    # netkeiba の結果より先に JRA だけで入った行にも、付記の無いレース名が入る
+    assert row["race_name_plain"] == race_names.plain_scrape_name(JRA_RACE["race_name"])
 
 
 def test_jra_race_is_not_counted_as_fetched(conn):

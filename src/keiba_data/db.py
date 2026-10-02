@@ -15,7 +15,7 @@ from datetime import date, datetime
 from importlib import resources
 from pathlib import Path
 
-from keiba_data import config
+from keiba_data import config, race_names
 from keiba_data.race_id import decode_race_id
 from keiba_data.scrapers.jra_odds import BET_TYPES
 from keiba_data.scrapers.race_result import RaceResultPage
@@ -113,6 +113,27 @@ def _migrate(conn: sqlite3.Connection) -> None:
             if "source" not in columns:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN source TEXT NOT NULL DEFAULT 'scrape'")
                 conn.commit()
+    # 付記の無いレース名（race_names.py）。scrape の行は移行時にまとめて埋める
+    # （Target の行は target-import のマージで作る）
+    if "races" in tables:
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(races)")}
+        if "race_name_plain" not in columns:
+            conn.execute("ALTER TABLE races ADD COLUMN race_name_plain TEXT")
+            if "race_name" in columns:
+                race_names.refresh_scrape_plain_names(conn)
+            conn.commit()
+    # Target書き出し時点の馬主（target-import）。レース当時の馬主（owner_id）とは分けて持つ
+    if "entries" in tables:
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(entries)")}
+        if "owner_id_at_export" not in columns:
+            conn.execute("ALTER TABLE entries ADD COLUMN owner_id_at_export TEXT REFERENCES owners(owner_id)")
+            conn.commit()
+    # 5代血統表の出どころ（netkeiba / 手元のデータから組んだ local。`bloodline-local`）
+    if "horse_ancestors" in tables:
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(horse_ancestors)")}
+        if "source" not in columns:
+            conn.execute("ALTER TABLE horse_ancestors ADD COLUMN source TEXT NOT NULL DEFAULT 'netkeiba'")
+            conn.commit()
     # 予想ボードで「消した」馬（保存済みの盤を壊さないよう、後から列を足す）
     if "board_horses" in tables:
         columns = {r["name"] for r in conn.execute("PRAGMA table_info(board_horses)")}
@@ -133,7 +154,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "horses" in tables:
         columns = {r["name"] for r in conn.execute("PRAGMA table_info(horses)")}
         for column in ("sire", "dam", "broodmare_sire", "owner_name", "breeder",
-                       "birth_date", "sire_no", "broodmare_sire_no", "trainer_name"):
+                       "birth_date", "sire_no", "broodmare_sire_no", "trainer_name",
+                       "sire_key", "broodmare_sire_key", "dam_key"):
             if column not in columns:
                 conn.execute(f"ALTER TABLE horses ADD COLUMN {column} TEXT")
         conn.commit()
@@ -191,6 +213,8 @@ def save_race_page(conn: sqlite3.Connection, page: RaceResultPage) -> None:
             _upsert_sql("races", RACE_COLUMNS + ("fetched_at", "updated_at"), "race_id", keep=("fetched_at",)),
             [race.get(c) for c in RACE_COLUMNS] + [ts, ts],
         )
+        conn.execute("UPDATE races SET race_name_plain = ? WHERE race_id = ?",
+                     (race_names.plain_scrape_name(race.get("race_name")), race_id))
         for e in page.entries:
             if e["horse_id"]:
                 conn.execute(
@@ -263,6 +287,8 @@ def save_jra_race(conn: sqlite3.Connection, race: dict, laps: list[dict]) -> Non
             f"{updates}, updated_at = excluded.updated_at",
             [race.get(c) for c in saved_columns] + [ts, ts],
         )
+        conn.execute("UPDATE races SET race_name_plain = COALESCE(?, race_name_plain) WHERE race_id = ?",
+                     (race_names.plain_scrape_name(race.get("race_name")), race_id))
         if laps:
             conn.execute("DELETE FROM race_laps WHERE race_id = ?", (race_id,))
             conn.executemany(
@@ -1112,7 +1138,8 @@ def save_horse_pedigree_tree(conn: sqlite3.Connection, horse_id: str, cells: lis
 def horses_without_bloodline(conn: sqlite3.Connection, limit: int | None = None) -> list[dict]:
     """5代血統表がまだ入っていない馬（**実際に出走した馬だけ**）。
 
-    血統表が入っているかは `horse_ancestors` に行があるかで見る。取り込みは
+    血統表が入っているかは `horse_ancestors` に netkeiba の行があるかで見る
+    （手元のデータで組んだ local の行は欠けがあるので、入っていないものとして数える）。取り込みは
     1頭ずつなので、途中で止めても次はここから続きが始まる。
 
     **新しい世代から取る**（`horse_id` は先頭4桁が生年なので降順＝新しい順）。
@@ -1123,7 +1150,8 @@ def horses_without_bloodline(conn: sqlite3.Connection, limit: int | None = None)
         SELECT h.horse_id, h.horse_name
           FROM horses h
          WHERE EXISTS (SELECT 1 FROM entries e WHERE e.horse_id = h.horse_id)
-           AND NOT EXISTS (SELECT 1 FROM horse_ancestors a WHERE a.horse_id = h.horse_id)
+           AND NOT EXISTS (SELECT 1 FROM horse_ancestors a
+                            WHERE a.horse_id = h.horse_id AND a.source = 'netkeiba')
       ORDER BY h.horse_id DESC
     """
     if limit is not None:
@@ -1131,12 +1159,22 @@ def horses_without_bloodline(conn: sqlite3.Connection, limit: int | None = None)
     return [dict(r) for r in conn.execute(sql)]
 
 
+def count_local_bloodline(conn: sqlite3.Connection) -> tuple[int, float]:
+    """(手元のデータで組んだ5代血統表がある馬, 1頭あたりの平均マス数)。"""
+    row = conn.execute(
+        "SELECT COUNT(DISTINCT horse_id) AS horses, COUNT(*) AS cells FROM horse_ancestors WHERE source = 'local'"
+    ).fetchone()
+    horses = row["horses"] or 0
+    return horses, (row["cells"] / horses if horses else 0.0)
+
+
 def count_bloodline(conn: sqlite3.Connection) -> tuple[int, int]:
-    """(5代血統表が入っている馬, 出走した馬の総数)。進み具合の表示に使う。"""
+    """(netkeiba の5代血統表が入っている馬, 出走した馬の総数)。進み具合の表示に使う。"""
     row = conn.execute(
         "SELECT COUNT(*) AS total, "
         "       SUM(CASE WHEN EXISTS (SELECT 1 FROM horse_ancestors a "
-        "                              WHERE a.horse_id = h.horse_id) THEN 1 ELSE 0 END) AS done "
+        "                              WHERE a.horse_id = h.horse_id AND a.source = 'netkeiba') "
+        "           THEN 1 ELSE 0 END) AS done "
         "  FROM horses h "
         " WHERE EXISTS (SELECT 1 FROM entries e WHERE e.horse_id = h.horse_id)"
     ).fetchone()
