@@ -23,10 +23,13 @@ logger = logging.getLogger(__name__)
 
 # 閲覧では使わない表。**子から先に**並べる（外部キーの向きに合わせる）。
 # Target の取り込み層（target_*）は個人で使うためだけのもので、分析に要るもの（付記の無いレース名・
-# 書き出し時点の馬主・名寄せキー・母のキー）は本体の列に写してあるので出さない
+# 書き出し時点の馬主・名寄せキー・母のキー）は本体の列に写してあるので出さない。
+# 5代血統表（horse_ancestors・pedigree_horses）は手元の血統クロス分析専用で、競馬新聞は読まない
+# （netkeiba 由来で再配布しないものでもある。閲覧用DBの半分を占めていた）
 VIEWER_DROP = ("payouts", "fetch_log", "parse_warnings",
                "target_horse_siblings", "target_runs", "target_races", "target_horses",
-               "target_fills", "target_import_files", "runs")
+               "target_fills", "target_import_files", "runs",
+               "horse_ancestors", "pedigree_horses")
 
 RELEASE_TAG = "db"
 ASSET_NAME = "keiba-viewer.db.gz"

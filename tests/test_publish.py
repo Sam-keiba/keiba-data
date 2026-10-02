@@ -42,6 +42,7 @@ def test_the_viewer_db_drops_what_the_screen_never_shows(filled, tmp_path):
     left = tables(viewer)
     assert not (left & set(publish.VIEWER_DROP))      # 払戻・取り込みの記録は入れない
     assert "target_horses" not in left and "target_runs" not in left   # Target の取り込み層は出さない
+    assert "horse_ancestors" not in left and "pedigree_horses" not in left   # 血統表は手元専用
     # 画面が読む表はそのまま残る
     for table in ("races", "entries", "results", "race_laps", "horses", "upcoming_races",
                   "upcoming_entries", "track_conditions", "odds", "board_horses", "bet_slips"):
