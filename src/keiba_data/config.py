@@ -133,6 +133,11 @@ LOG_DIR = PROJECT_ROOT / "logs"
 # 環境変数 KEIBA_REPO で差し替えられる。**プライベートのまま使う**
 PUBLISH_REPO = os.environ.get("KEIBA_REPO", "Sam-keiba/keiba-data")
 
+# Target（TARGET frontier JV）から手で書き出したCSVの置き場所（`keiba-data target-import`）。
+# 3リポジトリと同じ階層の datasets_from_target/ に race_data/ と horse_data/ がある前提。
+# 環境変数 KEIBA_TARGET_DIR で差し替えられる。元ファイルは読むだけで、変更しない
+TARGET_DATASETS_DIR = Path(os.environ.get("KEIBA_TARGET_DIR", PROJECT_ROOT.parent / "datasets_from_target"))
+
 # JRA公式のクッション値・含水率アーカイブPDFの置き場所
 # 構成: クッション値/{年}/{競馬場ローマ字}{開催回2桁}.pdf 例: クッション値/2026/nakayama03.pdf
 CUSHION_ARCHIVE_ROOT = PROJECT_ROOT / "クッション値"

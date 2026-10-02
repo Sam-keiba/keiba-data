@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS races (
     jra_cname       TEXT,                 -- JRA公式のレース結果ページのトークン（馬柱の映像リンクに使う）
     winner_corner   TEXT,                 -- 勝ち馬のコーナー通過順位（JRA公式由来。開催の傾向表示に使う）
     fetched_at      TEXT NOT NULL,        -- 最初に保存した日時
-    updated_at      TEXT NOT NULL         -- 最後に保存した日時
+    updated_at      TEXT NOT NULL,        -- 最後に保存した日時
+    source          TEXT NOT NULL DEFAULT 'scrape'  -- scrape=netkeiba/JRA公式 / target=Target（target-import）で作った行
 );
 CREATE INDEX IF NOT EXISTS idx_races_date ON races(race_date);
 
@@ -53,7 +54,8 @@ CREATE TABLE IF NOT EXISTS horses (
     sire_no            TEXT,              -- 父の血統登録番号（同名の種牡馬を取り違えないため）
     broodmare_sire_no  TEXT,              -- 母の父の血統登録番号
     trainer_name       TEXT,              -- 調教師名（詳細ページの表記）
-    updated_at     TEXT NOT NULL
+    updated_at     TEXT NOT NULL,
+    source         TEXT NOT NULL DEFAULT 'scrape'  -- scrape / target（races.source と同じ）
 );
 
 CREATE TABLE IF NOT EXISTS jockeys (
@@ -420,3 +422,207 @@ CREATE TABLE IF NOT EXISTS horse_ancestors (
 CREATE INDEX IF NOT EXISTS idx_horse_ancestors_ancestor
     ON horse_ancestors(ancestor_no, generation);
 CREATE INDEX IF NOT EXISTS idx_pedigree_horses_name ON pedigree_horses(name);
+
+
+-- ============================================================
+-- Target（TARGET frontier JV）から書き出したCSVの取り込み先（`keiba-data target-import`）。
+-- CSVを正規化しただけの「全列保存」の層で、PCI などTargetにしか無い指標はここにだけある。
+-- 本体（races/entries/results/horses/...）には、ここから足りない行と空欄だけを写す
+-- （既存の値は上書きしない。埋めた欄は target_fills に残す）。
+-- race_id / umaban / horse_id / jockey_id / trainer_id は本体と同じ体系（2023-01〜2026-09で全件一致を確認）。
+-- 元データは個人で使うためだけのもの。**閲覧用DBやgitに出さない。**
+-- ============================================================
+
+-- レース（1レース1行）。race_id は Target の18桁ID（年月日+場+回+日+R+馬番）の [0:4]+[8:16]
+CREATE TABLE IF NOT EXISTS target_races (
+    race_id          TEXT PRIMARY KEY,
+    race_date        TEXT NOT NULL,          -- 'YYYY-MM-DD'
+    venue_code       TEXT NOT NULL REFERENCES venues(venue_code),
+    kaiji            INTEGER NOT NULL,
+    nichime          INTEGER NOT NULL,
+    race_no          INTEGER NOT NULL,
+    kaisai_label     TEXT,                   -- '5中9'（原文）
+    race_name_short  TEXT,                   -- Targetの略称（正式名ではない）
+    class_name       TEXT,                   -- 未勝利/1勝/500万/オープン/G3/JG1/OP(L) 等
+    class_code       TEXT,
+    race_symbol_code TEXT,                   -- 競走記号（JVコード。混・指・特指・国際）
+    race_type_code   TEXT,                   -- 競走種別（JVコード。2歳・3歳以上 等）
+    weight_type_code TEXT,                   -- 重量種別 1=ハンデ 2=別定 3=馬齢 4=定量
+    track_code       TEXT,                   -- Target独自のコード（意味は未確認）
+    track_code_jv    TEXT,                   -- JVのトラックコード（10〜22=芝、23〜29=ダート、51〜59=障害）
+    surface          TEXT,                   -- turf/dirt/jump
+    distance_m       INTEGER,
+    turf_inout       TEXT,                   -- 内/外
+    course_setting   TEXT,                   -- 芝の使用コース A〜D（A1/A2 もある）
+    going            TEXT,                   -- 良/稍重/重/不良
+    weather          TEXT,
+    post_time        TEXT,                   -- 'HH:MM'
+    n_registered     INTEGER,                -- 頭数（取消・除外を含む）
+    n_runners        INTEGER,                -- 取消・除外を除く（races.n_runners と同じ定義）
+    pci3             REAL,
+    rpci             REAL,
+    source_file      TEXT NOT NULL,
+    imported_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_target_races_date ON target_races(race_date);
+
+-- 出走馬（1レース1頭1行。取消・除外・中止を含む）
+CREATE TABLE IF NOT EXISTS target_runs (
+    race_id             TEXT NOT NULL REFERENCES target_races(race_id) ON DELETE CASCADE,
+    umaban              INTEGER NOT NULL,
+    waku                INTEGER,
+    horse_id            TEXT NOT NULL,       -- 血統登録番号（= horses.horse_id）
+    horse_name          TEXT,
+    sex                 TEXT,
+    age                 INTEGER,
+    jockey_id           TEXT,                -- = jockeys.jockey_id
+    jockey_name         TEXT,                -- Targetの短縮表記
+    trainer_id          TEXT,                -- = trainers.trainer_id
+    trainer_name        TEXT,
+    stable              TEXT,                -- 美浦/栗東/地方/海外
+    kinryo              REAL,
+    kinryo_mark         TEXT,                -- 減量記号 ☆▲△◇★
+    blinker             INTEGER,             -- 1=着用
+    horse_mark          TEXT,                -- (父)(市)(外)(地)(抽)[地][外] 等
+    horse_mark_code     TEXT,
+    multi_entry         INTEGER,             -- 1=多頭出し（Targetの定義は未確認）
+    abnormal_code       INTEGER,             -- 0=正常 1=取消 3=除外 4=中止 7=降着（2・5・6は未確認）
+    finish_raw          TEXT,                -- 着順の原文（NFKC。消/外/止/丸数字を含む）
+    finish_position     INTEGER,             -- 確定着順。取消・除外・中止はNULL
+    arrival_order       INTEGER,             -- 入線順位
+    time_sec            REAL,
+    margin_sec          REAL,                -- 勝ち馬とのタイム差（1着は2着との差がマイナス）
+    margin              TEXT,                -- 着差の文字表記（Targetの原文）
+    corner1             INTEGER,
+    corner2             INTEGER,
+    corner3             INTEGER,
+    corner4             INTEGER,
+    last_3f             REAL,
+    last_3f_rank        INTEGER,
+    diff_at_3f          REAL,                -- 上3F地点差（Targetの定義は未確認）
+    ave_3f              REAL,
+    pci                 REAL,
+    good_run            INTEGER,             -- 1=好走（Targetの定義は未確認）
+    avg_1f_sec          REAL,
+    avg_speed           REAL,
+    speed_ex_last3f     REAL,
+    speed_last3f        REAL,
+    finishing_move      TEXT,                -- 決め手
+    running_style       TEXT,                -- 脚質
+    win_odds            REAL,
+    popularity          INTEGER,
+    horse_weight        INTEGER,
+    weight_diff         INTEGER,
+    prize_man_yen       REAL,                -- 本賞金のみ（results.prize_man_yen は付加賞込み）
+    added_prize_man_yen REAL,
+    age_days            INTEGER,             -- 生後日数
+    source_file         TEXT NOT NULL,
+    imported_at         TEXT NOT NULL,
+    PRIMARY KEY (race_id, umaban)
+);
+CREATE INDEX IF NOT EXISTS idx_target_runs_horse ON target_runs(horse_id);
+CREATE INDEX IF NOT EXISTS idx_target_runs_jockey ON target_runs(jockey_id);
+CREATE INDEX IF NOT EXISTS idx_target_runs_trainer ON target_runs(trainer_id);
+
+-- 競走馬（1頭1行）。祖先の番号は繁殖登録番号で、horses.sire_no（血統登録番号）とは別の体系
+CREATE TABLE IF NOT EXISTS target_horses (
+    horse_id                  TEXT PRIMARY KEY,
+    horse_name                TEXT,
+    name_en                   TEXT,
+    sex                       TEXT,
+    age_at_export             INTEGER,       -- 書き出した時点の馬齢
+    status                    TEXT,          -- 在厩/不在/抹消
+    horse_mark                TEXT,
+    stable                    TEXT,
+    trainer_name              TEXT,
+    birth_date                TEXT,
+    coat_color                TEXT,
+    birthplace                TEXT,
+    sire_name                 TEXT,
+    sire_bms_name             TEXT,          -- 父の母の父
+    dam_name                  TEXT,
+    bms_name                  TEXT,          -- 母の父
+    dam_dam_name              TEXT,
+    dam_dam_sire_name         TEXT,
+    dam_dam_dam_name          TEXT,
+    sire_breed_no             TEXT,
+    sire_bms_breed_no         TEXT,
+    dam_breed_no              TEXT,
+    bms_breed_no              TEXT,
+    dam_dam_breed_no          TEXT,
+    dam_dam_sire_breed_no     TEXT,
+    dam_dam_dam_breed_no      TEXT,
+    sire_line                 TEXT,          -- 系統名
+    sire_bms_line             TEXT,
+    bms_line                  TEXT,
+    dam_dam_sire_line         TEXT,
+    sire_age                  INTEGER,       -- 何時点の年齢かは未確認
+    sire_coat                 TEXT,
+    dam_age                   INTEGER,
+    dam_coat                  TEXT,
+    dam_dam_age               INTEGER,
+    dam_dam_coat              TEXT,
+    owner_code                TEXT,          -- = owners.owner_id
+    owner_name                TEXT,
+    silks                     TEXT,          -- 勝負服色
+    breeder_name              TEXT,
+    earned_prize_man_yen      REAL,          -- 収得賞金
+    jump_earned_prize_man_yen REAL,
+    main_prize_man_yen        REAL,          -- 本賞金
+    added_prize_man_yen       REAL,
+    n_1st                     INTEGER,
+    n_2nd                     INTEGER,
+    n_3rd                     INTEGER,
+    n_other                   INTEGER,
+    n_races_total             INTEGER,
+    n_races_actual            INTEGER,
+    n_races_jra               INTEGER,
+    first_venue               TEXT,          -- 初場（意味は未確認）
+    latest_venue              TEXT,          -- 新場（意味は未確認）
+    first_race_key18          TEXT,
+    latest_race_key18         TEXT,
+    registered_date           TEXT,
+    retired_date              TEXT,
+    data_created_date         TEXT,          -- 同じ馬が2行あるときは新しい方を採る
+    sale_price_man_yen        REAL,          -- 万円（税込の端数がある年は小数）
+    sale_price_note           TEXT,          -- '(他)' 等
+    sale_name                 TEXT,
+    name_origin               TEXT,          -- 馬名の意味由来
+    sibling_n                 INTEGER,
+    sibling_prize_sum_man_yen REAL,
+    sibling_prize_avg_man_yen REAL,
+    source_file               TEXT NOT NULL,
+    imported_at               TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_target_horses_sire_no ON target_horses(sire_breed_no);
+
+-- 収得賞金上位の兄弟（1頭最大5行）
+CREATE TABLE IF NOT EXISTS target_horse_siblings (
+    horse_id     TEXT NOT NULL REFERENCES target_horses(horse_id) ON DELETE CASCADE,
+    rank         INTEGER NOT NULL,
+    sibling_name TEXT NOT NULL,
+    n_wins       INTEGER,
+    PRIMARY KEY (horse_id, rank)
+);
+
+-- 取り込んだファイル（中身の sha256 が同じなら取り込み直さない）
+CREATE TABLE IF NOT EXISTS target_import_files (
+    file_name   TEXT PRIMARY KEY,            -- 'race_data/race_data_2024.csv'
+    kind        TEXT NOT NULL,               -- race/horse
+    sha256      TEXT NOT NULL,
+    size_bytes  INTEGER NOT NULL,
+    n_rows      INTEGER NOT NULL,            -- ヘッダーを除く行数
+    n_loaded    INTEGER NOT NULL,
+    n_skipped   INTEGER NOT NULL,
+    run_id      INTEGER REFERENCES runs(run_id),
+    imported_at TEXT NOT NULL
+);
+
+-- 本体の空欄を Target で埋めた記録（どの行のどの欄を埋めたか）。元に戻すときの手がかり
+CREATE TABLE IF NOT EXISTS target_fills (
+    table_name  TEXT NOT NULL,
+    row_key     TEXT NOT NULL,               -- 主キーを '|' でつないだもの
+    column_name TEXT NOT NULL,
+    filled_at   TEXT NOT NULL,
+    PRIMARY KEY (table_name, row_key, column_name)
+);

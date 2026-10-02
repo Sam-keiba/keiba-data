@@ -4,3 +4,7 @@ __pycache__/
 *.egg-info
 uv.lock
 .DS_Store
+
+# ローカルDB・バックアップ・ログ（非公開。Target/netkeiba由来データを含む）
+data/
+logs/

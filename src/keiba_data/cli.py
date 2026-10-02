@@ -11,6 +11,7 @@
   uv run keiba-data pedigree                      馬の父・母・母の父をJRA公式から取り込む（種牡馬分析の土台）
   uv run keiba-data bloodline                     5代血統表を取り込む（血統クロス分析の土台）
   uv run keiba-data sire-fetch                    種牡馬リーディング（AEI）をJRA公式から取り込む
+  uv run keiba-data target-import                Targetから書き出したCSVを取り込む（足りない行と空欄だけを本体へ）
   uv run keiba-data publish                       閲覧用DBを作ってGitHubのリリースへ上げる（クラウド版に反映）
   uv run keiba-data status                        DBの件数・期間・直近の実行結果を表示
 
@@ -25,8 +26,9 @@ import logging
 import subprocess
 import sys
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
-from keiba_data import config, cushion, db, publish as publish_module
+from keiba_data import config, cushion, db, publish as publish_module, target_import
 from keiba_data.html_store import HtmlStore
 from keiba_data.http import BlockedError, PoliteSession, RequestBudgetExceeded
 from keiba_data.scrapers import jra_odds, jra_sire
@@ -276,6 +278,43 @@ def _publish(args: argparse.Namespace) -> int:
     if args.no_upload:
         print("上げていません。上げるときは --no-upload を外して実行してください。")
     return EXIT_OK
+
+
+def _target_import(args: argparse.Namespace) -> int:
+    """Targetから書き出したCSVを取り込み、本体（races/entries/results/horses…）へ写す。
+
+    ネットにはアクセスしない。何度流しても同じ結果になる（中身の変わらないファイルは読み飛ばす）。
+    """
+    if args.merge_only and args.no_merge:
+        logger.error("--merge-only と --no-merge は同時に指定できません")
+        return EXIT_FAILED
+    conn = db.connect(config.DB_PATH)
+    run_id = None if args.dry_run else db.start_run(conn, "target-import", args.raw_args)
+    kinds = ("race", "horse") if args.kind == "all" else (args.kind,)
+    status, message, n_warnings = "failed", None, 0
+    try:
+        results = []
+        if not args.merge_only:
+            results = target_import.load_files(conn, args.dir, kinds=kinds, only=args.file, run_id=run_id,
+                                               force=args.force, dry_run=args.dry_run)
+            n_warnings = sum(len(r.warnings) for r in results)
+        merged = None
+        if not args.no_merge:
+            merged = target_import.merge(conn, dry_run=args.dry_run)
+        loaded = sum(r.n_loaded for r in results if not r.unchanged)
+        message = (f"取込{loaded:,}行 スキップ{sum(r.n_skipped for r in results):,}行"
+                   + (f" / 本体に追加 {dict(merged.inserted)} / 空欄を埋めた{sum(merged.filled.values()):,}欄"
+                      if merged else ""))
+        status = "success"
+        logger.info("target-import: %s%s", message, "（dry-run: DBは変更していません）" if args.dry_run else "")
+        return EXIT_OK
+    except KeyboardInterrupt:
+        status = "interrupted"
+        return EXIT_INTERRUPTED
+    finally:
+        if run_id is not None:
+            db.finish_run(conn, run_id, status, 0, 0, n_warnings, message)
+        conn.close()
 
 
 def _fetch_sire(updater: Updater, args: argparse.Namespace) -> None:
@@ -539,6 +578,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_publish.add_argument("--no-upload", action="store_true", help="ファイルを作るだけで上げない")
     p_publish.add_argument("--repo", default=None, help=f"送り先（既定 {config.PUBLISH_REPO}）")
     p_publish.set_defaults(func=_publish)
+
+    p_target = sub.add_parser(
+        "target-import", help="Targetから書き出したCSVを取り込み、本体の足りない行・空欄を埋める（ネットにアクセスしない）")
+    p_target.add_argument("--kind", default="all", choices=["all", "race", "horse"],
+                          help="race=race_data / horse=horse_data（既定は両方）")
+    p_target.add_argument("--file", default=None, help="このファイルだけ取り込む（例 race_data_2024.csv）")
+    p_target.add_argument("--dir", type=Path, default=config.TARGET_DATASETS_DIR,
+                          help=f"CSVの置き場所（既定 {config.TARGET_DATASETS_DIR}）")
+    p_target.add_argument("--force", action="store_true", help="前回と同じ中身のファイルも読み直す")
+    p_target.add_argument("--dry-run", action="store_true", help="DBを変えずに、件数とスキップ理由だけ出す")
+    p_target.add_argument("--no-merge", action="store_true", help="target_* に入れるだけで、本体には写さない")
+    p_target.add_argument("--merge-only", action="store_true", help="CSVは読まず、target_* から本体へ写すだけ")
+    p_target.set_defaults(func=_target_import)
 
     p_reparse = sub.add_parser("reparse", help="保存済みHTMLからDBを作り直す（ネットにアクセスしない）")
     p_reparse.set_defaults(func=_run)

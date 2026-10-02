@@ -105,6 +105,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if "winner_corner" not in columns:
             conn.execute("ALTER TABLE races ADD COLUMN winner_corner TEXT")
             conn.commit()
+    # Target（`target-import`）で作った行と見分ける出所。定数の既定値なので、
+    # 既存の行は書き換えずに 'scrape' として読める
+    for table in ("races", "horses"):
+        if table in tables:
+            columns = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if "source" not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN source TEXT NOT NULL DEFAULT 'scrape'")
+                conn.commit()
     # 予想ボードで「消した」馬（保存済みの盤を壊さないよう、後から列を足す）
     if "board_horses" in tables:
         columns = {r["name"] for r in conn.execute("PRAGMA table_info(board_horses)")}
