@@ -822,13 +822,16 @@ def _fill_dam_key(conn: sqlite3.Connection) -> int:
 
 
 def derive(conn: sqlite3.Connection) -> None:
-    """target_* と本体から作り直すもの（付記の無いレース名・書き出し時点の馬主・母のキー・種牡馬の名寄せ）。"""
+    """target_* と本体から作り直すもの（付記の無いレース名・書き出し時点の馬主・母のキー・減量の印・種牡馬の名寄せ）。"""
     with conn:
         race_names.refresh_target_plain_names(conn)
     n = _fill_export_owner(conn)
     logger.info("書き出し時点の馬主（entries.owner_id_at_export）: %s行を更新", f"{n:,}")
     n = _fill_dam_key(conn)
     logger.info("母のキー（horses.dam_key）: %s頭を更新", f"{n:,}")
+    with conn:
+        n = db.fill_kinryo_marks(conn)
+    logger.info("減量騎手の印（entries.kinryo_mark）: %s行を更新", f"{n:,}")
     sire_keys.rebuild_sire_keys(conn)
 
 

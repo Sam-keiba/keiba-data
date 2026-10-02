@@ -284,6 +284,36 @@ def test_merge_derives_plain_name_export_owner_and_sire_keys(conn, datasets):
     assert [r[0] for r in conn.execute("SELECT DISTINCT dam_key FROM horses")] == ["1220000001"]
 
 
+def test_merge_copies_the_apprentice_mark_to_entries(conn, tmp_path):
+    root = tmp_path / "datasets"
+    write_csv(root / "race_data" / "race_data_2024.csv", [
+        race_row("202401060601010101", {ti.R_KINRYO: "53▲"}),
+        race_row("202401060601010102", {ti.R_HORSE_ID: "2021100002", ti.R_FINISH: "２", ti.R_FINISH_POS: "2",
+                                          ti.R_ARRIVAL: "2"}),
+    ], ti.RACE_N_COLUMNS)
+    ti.load_files(conn, root, kinds=("race",))
+    ti.merge(conn)
+    rows = dict(conn.execute("SELECT umaban, kinryo_mark FROM entries"))
+    assert rows == {1: "▲", 2: None}
+    kinryo = conn.execute("SELECT kinryo FROM entries WHERE umaban = 1").fetchone()[0]
+    assert kinryo == 53.0
+
+
+def test_merge_copies_the_apprentice_mark_to_entries(conn, tmp_path):
+    root = tmp_path / "datasets"
+    write_csv(root / "race_data" / "race_data_2024.csv", [
+        race_row("202401060601010101", {ti.R_KINRYO: "53▲"}),
+        race_row("202401060601010102", {ti.R_HORSE_ID: "2021100002", ti.R_FINISH: "２", ti.R_FINISH_POS: "2",
+                                          ti.R_ARRIVAL: "2"}),
+    ], ti.RACE_N_COLUMNS)
+    ti.load_files(conn, root, kinds=("race",))
+    ti.merge(conn)
+    rows = dict(conn.execute("SELECT umaban, kinryo_mark FROM entries"))
+    assert rows == {1: "▲", 2: None}
+    kinryo = conn.execute("SELECT kinryo FROM entries WHERE umaban = 1").fetchone()[0]
+    assert kinryo == 53.0
+
+
 def test_merge_dry_run_leaves_derived_columns_empty(conn, datasets):
     ti.load_files(conn, datasets)
     ti.merge(conn, dry_run=True)

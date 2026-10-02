@@ -117,6 +117,10 @@ SIRE_LEADING_PAGES = 5
 # 画面が既定で見る年数（AEI推移グラフの横軸）
 SIRE_LEADING_YEARS = 5
 
+# 調教師名鑑（正式名・読み・生年月日・免許取得年）。入口は静的ページ、その先は accessC
+JRA_TRAINER_INDEX_URL = "https://www.jra.go.jp/datafile/meikan/trainer.html"
+JRA_TRAINER_URL = "https://www.jra.go.jp/JRADB/accessC.html"
+
 # オッズ（単勝〜3連単）。結果・出馬表と同じ作りで、入口とページの種類（accessO）だけ別。
 # 券種ごとに1ページに分かれていて、3連単3,360点でも1ページに全部入っている。
 JRA_ODDS_URL = "https://www.jra.go.jp/JRADB/accessO.html"

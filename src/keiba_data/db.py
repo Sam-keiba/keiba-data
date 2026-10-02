@@ -128,6 +128,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if "owner_id_at_export" not in columns:
             conn.execute("ALTER TABLE entries ADD COLUMN owner_id_at_export TEXT REFERENCES owners(owner_id)")
             conn.commit()
+        # 減量騎手の印（target_runs・JRAの出馬表から写す）。厩舎分析の「見習い騎手起用」に使う
+        if "kinryo_mark" not in columns:
+            conn.execute("ALTER TABLE entries ADD COLUMN kinryo_mark TEXT")
+            conn.commit()
+    # JRAの調教師名鑑から入れる正式名など（netkeibaの名前は4文字で切れている）
+    if "trainers" in tables:
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(trainers)")}
+        for column, kind in (("full_name", "TEXT"), ("kana", "TEXT"), ("birth_date", "TEXT"),
+                             ("license_year", "INTEGER"), ("meikan_updated_at", "TEXT")):
+            if column not in columns:
+                conn.execute(f"ALTER TABLE trainers ADD COLUMN {column} {kind}")
+        conn.commit()
     # 5代血統表の出どころ（netkeiba / 手元のデータから組んだ local。`bloodline-local`）
     if "horse_ancestors" in tables:
         columns = {r["name"] for r in conn.execute("PRAGMA table_info(horse_ancestors)")}
@@ -173,6 +185,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "seq" not in columns:
         conn.execute("DROP TABLE upcoming_entries")
         conn.execute("UPDATE upcoming_races SET entry_status = 'list_only'")
+        conn.commit()
+    elif "kinryo_mark" not in columns:
+        conn.execute("ALTER TABLE upcoming_entries ADD COLUMN kinryo_mark TEXT")
         conn.commit()
 
 
@@ -245,6 +260,8 @@ def save_race_page(conn: sqlite3.Connection, page: RaceResultPage) -> None:
         conn.executemany(_insert_sql("results", RESULT_COLUMNS), [[r.get(c) for c in RESULT_COLUMNS] for r in page.results])
         conn.executemany(_insert_sql("payouts", PAYOUT_COLUMNS), [[p.get(c) for c in PAYOUT_COLUMNS] for p in page.payouts])
         conn.executemany(_insert_sql("race_laps", LAP_COLUMNS), [[lap.get(c) for c in LAP_COLUMNS] for lap in page.laps])
+        # netkeibaの結果ページには減量の印が無いので、Target・JRAの出馬表から写し直す
+        fill_kinryo_marks(conn, race_id)
 
 
 def race_ids_with_results(conn: sqlite3.Connection, race_ids: list[str]) -> set[str]:
@@ -398,6 +415,76 @@ def save_upcoming_weights(conn: sqlite3.Connection, race_id: str, profiles: list
     return saved
 
 
+def save_trainer_profile(conn: sqlite3.Connection, profile) -> None:
+    """JRAの調教師名鑑から読んだ1人ぶんを trainers に入れる（`jra_trainer.TrainerProfile`）。
+
+    netkeibaの4文字の名前（trainer_name）には触らない（下流が今もそれで表示・照合している）。
+    まだ1走もしていない新規開業の調教師は行ごと足す（trainer_name は空のまま）。
+    """
+    ts = now_str()
+    with conn:
+        conn.execute(
+            "INSERT INTO trainers (trainer_id, stable, full_name, kana, birth_date, license_year, "
+            "meikan_updated_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(trainer_id) DO UPDATE SET stable = COALESCE(excluded.stable, stable), "
+            "full_name = excluded.full_name, kana = excluded.kana, birth_date = excluded.birth_date, "
+            "license_year = excluded.license_year, meikan_updated_at = excluded.meikan_updated_at, "
+            "updated_at = excluded.updated_at",
+            (profile.trainer_id, profile.stable, profile.full_name, profile.kana, profile.birth_date,
+             profile.license_year, ts, ts),
+        )
+
+
+def save_upcoming_kinryo_marks(conn: sqlite3.Connection, race_id: str, profiles: list) -> int:
+    """JRAの出馬表から読んだ減量騎手の印を `upcoming_entries` に入れる。入れた頭数を返す。
+
+    印は騎手に付くものなので、**JRAの出馬表の騎手と netkeiba の出馬表の騎手が同じ行だけ**
+    書く（どちらかの取り直しが遅れて騎手が食い違う間は、どの騎手の印か分からないため触らない）。
+    印の無い騎手は NULL で上書きする（減量の無いレース・減量の外れた騎手）。
+    """
+    entries = list(conn.execute(
+        "SELECT seq, umaban, horse_name, jockey_id FROM upcoming_entries WHERE race_id = ?", (race_id,)
+    ))
+    by_umaban = {r["umaban"]: r for r in entries if r["umaban"] is not None}
+    by_name = {r["horse_name"]: r for r in entries if r["horse_name"]}
+
+    saved = 0
+    with conn:
+        for profile in profiles:
+            entry = by_umaban.get(profile.umaban) or by_name.get(profile.horse_name)
+            if entry is None or not profile.jockey_id or entry["jockey_id"] != profile.jockey_id:
+                continue
+            conn.execute(
+                "UPDATE upcoming_entries SET kinryo_mark = ? WHERE race_id = ? AND seq = ?",
+                (profile.kinryo_mark, race_id, entry["seq"]),
+            )
+            saved += 1
+    return saved
+
+
+def fill_kinryo_marks(conn: sqlite3.Connection, race_id: str | None = None) -> int:
+    """entries.kinryo_mark を埋め直す。書き換えた行数を返す（`race_id` を渡せばそのレースだけ）。
+
+    Targetの書き出し（target_runs）に行がある走はそれに従う（印が無ければNULL）。
+    無い走（Targetを書き出した日より後）は、JRAの出馬表の印（upcoming_entries）を
+    **同じ馬番・同じ騎手**のときだけ写す（乗り替わった走には前の騎手の印を付けない）。
+    呼び手がトランザクションを持つ（save_race_page の中からも呼ぶため、ここではcommitしない）。
+    """
+    value = (
+        "CASE WHEN EXISTS (SELECT 1 FROM target_runs t "
+        "                  WHERE t.race_id = entries.race_id AND t.umaban = entries.umaban) "
+        "THEN (SELECT NULLIF(t.kinryo_mark, '') FROM target_runs t "
+        "      WHERE t.race_id = entries.race_id AND t.umaban = entries.umaban) "
+        "ELSE (SELECT u.kinryo_mark FROM upcoming_entries u "
+        "      WHERE u.race_id = entries.race_id AND u.umaban = entries.umaban "
+        "        AND u.jockey_id = entries.jockey_id) END"
+    )
+    where, params = ("AND race_id = ?", (race_id,)) if race_id else ("", ())
+    return conn.execute(
+        f"UPDATE entries SET kinryo_mark = {value} WHERE kinryo_mark IS NOT {value} {where}", params
+    ).rowcount
+
+
 def latest_race_date(conn: sqlite3.Connection) -> date | None:
     """**馬ごとの結果まで**入っている最新の開催日（netkeibaの取得再開点に使う）。
 
@@ -533,6 +620,7 @@ UPCOMING_RACE_COLUMNS = (
 UPCOMING_ENTRY_COLUMNS = (
     "race_id", "seq", "umaban", "waku", "horse_id", "horse_name", "sex", "age", "kinryo", "jockey_id",
     "jockey_name", "trainer_id", "trainer_name", "stable", "horse_weight", "weight_diff", "status",
+    "kinryo_mark",
 )
 
 
@@ -588,7 +676,7 @@ def save_upcoming_shutuba(conn: sqlite3.Connection, page: ShutubaPage) -> None:
     ts = now_str()
     # 枠順が確定していれば entries、出走馬だけ判明している段階は registered
     entry_status = "entries" if any(e.get("umaban") for e in page.entries) else "registered"
-    entries = _keep_known_weights(conn, race_id, page.entries)
+    entries = _keep_known_marks(conn, race_id, _keep_known_weights(conn, race_id, page.entries))
     with conn:
         _upsert_upcoming_race(conn, page.race, entry_status, ts)
         conn.execute("DELETE FROM upcoming_entries WHERE race_id = ?", (race_id,))
@@ -626,6 +714,27 @@ def _keep_known_weights(conn: sqlite3.Connection, race_id: str, entries: list[di
             continue
         kept.append({**entry, "horse_weight": weight[0], "weight_diff": weight[1]})
     return kept
+
+
+def _keep_known_marks(conn: sqlite3.Connection, race_id: str, entries: list[dict]) -> list[dict]:
+    """JRAの出馬表から入れた減量騎手の印を、netkeibaの出馬表を取り直しても残す。
+
+    印は騎手に付くので、**同じ馬に同じ騎手が乗る行だけ**持ち越す（乗り替わりなら捨てる）。
+    """
+    known = {
+        (row["horse_id"], row["jockey_id"]): row["kinryo_mark"]
+        for row in conn.execute(
+            "SELECT horse_id, jockey_id, kinryo_mark FROM upcoming_entries "
+            "WHERE race_id = ? AND kinryo_mark IS NOT NULL AND horse_id IS NOT NULL", (race_id,)
+        )
+    }
+    if not known:
+        return entries
+    return [
+        {**e, "kinryo_mark": known[(e.get("horse_id"), e.get("jockey_id"))]}
+        if e.get("kinryo_mark") is None and (e.get("horse_id"), e.get("jockey_id")) in known else e
+        for e in entries
+    ]
 
 
 def parse_course_text(text: str | None) -> tuple[str | None, int | None]:

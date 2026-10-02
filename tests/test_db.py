@@ -273,8 +273,9 @@ class _Profile:
 
     def __init__(self, umaban, horse_name, sire=None, dam=None,
                  broodmare_sire=None, owner=None, breeder=None,
-                 horse_weight=None, weight_diff=None):
+                 horse_weight=None, weight_diff=None, jockey_id=None, kinryo_mark=None):
         self.umaban, self.horse_name = umaban, horse_name
+        self.jockey_id, self.kinryo_mark = jockey_id, kinryo_mark
         self.sire, self.dam, self.broodmare_sire = sire, dam, broodmare_sire
         self.owner, self.breeder = owner, breeder
         self.horse_weight, self.weight_diff = horse_weight, weight_diff
@@ -386,6 +387,94 @@ def test_resaving_the_netkeiba_shutuba_keeps_the_weight(conn):
     assert conn.execute(
         "SELECT COUNT(*) FROM upcoming_entries WHERE horse_weight IS NULL"
     ).fetchone()[0] == 12
+
+
+# --- 減量騎手の印（JRA公式の出馬表から） -------------------------------------------
+
+
+def test_save_upcoming_kinryo_marks_only_for_the_same_jockey(conn):
+    """印は騎手に付く。netkeibaとJRAで騎手が食い違う行（取り直しの途中）には書かない。"""
+    db.save_upcoming_shutuba(conn, _shutuba())
+    rows = conn.execute("SELECT umaban, horse_name, jockey_id FROM upcoming_entries ORDER BY seq").fetchall()
+    first, second = rows[0], rows[1]
+    saved = db.save_upcoming_kinryo_marks(conn, "202606040611", [
+        _Profile(first["umaban"], first["horse_name"], jockey_id=first["jockey_id"], kinryo_mark="▲"),
+        _Profile(second["umaban"], second["horse_name"], jockey_id="99999", kinryo_mark="☆"),
+    ])
+    assert saved == 1
+    marks = dict(conn.execute("SELECT umaban, kinryo_mark FROM upcoming_entries"))
+    assert marks[first["umaban"]] == "▲" and marks[second["umaban"]] is None
+
+    # netkeibaの出馬表を取り直しても、同じ騎手なら印は残る
+    db.save_upcoming_shutuba(conn, _shutuba())
+    marks = dict(conn.execute("SELECT umaban, kinryo_mark FROM upcoming_entries"))
+    assert marks[first["umaban"]] == "▲"
+
+
+def test_saving_the_result_copies_the_mark_of_the_same_jockey(conn):
+    """netkeibaの結果ページには印が無いので、出馬表（upcoming_entries）の印を写す。"""
+    page = _page()
+    by_umaban = {e["umaban"]: e for e in page.entries}
+    conn.execute("INSERT INTO upcoming_races (race_id, race_date, venue_code, entry_status, fetched_at, "
+                 "updated_at) VALUES ('202606040411', '2026-09-14', '06', 'entries', '', '')")
+    for seq, (umaban, jockey_id, mark) in enumerate([
+        (1, by_umaban[1]["jockey_id"], "▲"),
+        (2, "99999", "☆"),                       # 出馬表の後で乗り替わった → 写さない
+    ], 1):
+        conn.execute("INSERT INTO upcoming_entries (race_id, seq, umaban, horse_id, jockey_id, kinryo_mark) "
+                     "VALUES ('202606040411', ?, ?, ?, ?, ?)",
+                     (seq, umaban, by_umaban[umaban]["horse_id"], jockey_id, mark))
+    conn.commit()
+
+    db.save_race_page(conn, page)
+    marks = dict(conn.execute("SELECT umaban, kinryo_mark FROM entries"))
+    assert marks[1] == "▲"
+    assert marks[2] is None
+    assert sum(m is not None for m in marks.values()) == 1
+
+
+# --- 減量騎手の印（JRA公式の出馬表から） -------------------------------------------
+
+
+def test_save_upcoming_kinryo_marks_only_for_the_same_jockey(conn):
+    """印は騎手に付く。netkeibaとJRAで騎手が食い違う行（取り直しの途中）には書かない。"""
+    db.save_upcoming_shutuba(conn, _shutuba())
+    rows = conn.execute("SELECT umaban, horse_name, jockey_id FROM upcoming_entries ORDER BY seq").fetchall()
+    first, second = rows[0], rows[1]
+    saved = db.save_upcoming_kinryo_marks(conn, "202606040611", [
+        _Profile(first["umaban"], first["horse_name"], jockey_id=first["jockey_id"], kinryo_mark="▲"),
+        _Profile(second["umaban"], second["horse_name"], jockey_id="99999", kinryo_mark="☆"),
+    ])
+    assert saved == 1
+    marks = dict(conn.execute("SELECT umaban, kinryo_mark FROM upcoming_entries"))
+    assert marks[first["umaban"]] == "▲" and marks[second["umaban"]] is None
+
+    # netkeibaの出馬表を取り直しても、同じ騎手なら印は残る
+    db.save_upcoming_shutuba(conn, _shutuba())
+    marks = dict(conn.execute("SELECT umaban, kinryo_mark FROM upcoming_entries"))
+    assert marks[first["umaban"]] == "▲"
+
+
+def test_saving_the_result_copies_the_mark_of_the_same_jockey(conn):
+    """netkeibaの結果ページには印が無いので、出馬表（upcoming_entries）の印を写す。"""
+    page = _page()
+    by_umaban = {e["umaban"]: e for e in page.entries}
+    conn.execute("INSERT INTO upcoming_races (race_id, race_date, venue_code, entry_status, fetched_at, "
+                 "updated_at) VALUES ('202606040411', '2026-09-14', '06', 'entries', '', '')")
+    for seq, (umaban, jockey_id, mark) in enumerate([
+        (1, by_umaban[1]["jockey_id"], "▲"),
+        (2, "99999", "☆"),                       # 出馬表の後で乗り替わった → 写さない
+    ], 1):
+        conn.execute("INSERT INTO upcoming_entries (race_id, seq, umaban, horse_id, jockey_id, kinryo_mark) "
+                     "VALUES ('202606040411', ?, ?, ?, ?, ?)",
+                     (seq, umaban, by_umaban[umaban]["horse_id"], jockey_id, mark))
+    conn.commit()
+
+    db.save_race_page(conn, page)
+    marks = dict(conn.execute("SELECT umaban, kinryo_mark FROM entries"))
+    assert marks[1] == "▲"
+    assert marks[2] is None
+    assert sum(m is not None for m in marks.values()) == 1
 
 
 # --- 予想ボード ---------------------------------------------------------------------

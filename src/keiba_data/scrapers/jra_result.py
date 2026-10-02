@@ -218,6 +218,8 @@ class HorseProfile:
     breeder: str | None = None         # 生産牧場
     horse_weight: int | None = None    # 馬体重（当日発表前はNone）
     weight_diff: int | None = None     # 前走からの増減（初出走・発表前はNone）
+    jockey_id: str | None = None       # 騎手コード（= jockeys.jockey_id。リンク `pw04kmk0<5桁>` から）
+    kinryo_mark: str | None = None     # 減量騎手の印（▲△☆◇★。減量が無ければNone）
 
 
 def _family(cell: Tag, selector: str) -> str | None:
@@ -246,6 +248,20 @@ def _weight(cell: Tag) -> tuple[int | None, int | None]:
     return parsing.parse_weight(node.get_text(" ", strip=True))
 
 
+_JOCKEY_CODE_RE = re.compile(r"pw04kmk\d(\d{5})/")
+
+
+def _jockey(tag: Tag | None) -> tuple[str | None, str | None]:
+    """騎手欄 `<p class="jockey"><span title="3kg減量" class="mark jockey">▲</span><a …pw04kmk001207/96…>`
+    から (騎手コード, 減量の印) を読む。"""
+    if tag is None:
+        return None, None
+    link = tag.find("a", onclick=True)
+    matched = _JOCKEY_CODE_RE.search(link["onclick"]) if link else None
+    mark = _text(tag.select_one("span.mark"))
+    return (matched.group(1) if matched else None), (mark or None)
+
+
 def parse_shutuba_profiles(html: str) -> list[HorseProfile]:
     """JRA公式の出馬表（1レース1ページ）から、馬ごとの血統・馬主・生産牧場と馬体重を読む。
 
@@ -262,6 +278,7 @@ def parse_shutuba_profiles(html: str) -> list[HorseProfile]:
         bloodmare = _text(cell.select_one("span.bloodmare"))
         matched = re.search(r"母の父[：:]\s*([^）)]+)", bloodmare) if bloodmare else None
         horse_weight, weight_diff = _weight(cell)
+        jockey_id, kinryo_mark = _jockey(row.select_one("p.jockey"))
         profiles.append(HorseProfile(
             umaban=parsing.to_int(_text(row.select_one("td.num"))),
             horse_name=name,
@@ -272,6 +289,8 @@ def parse_shutuba_profiles(html: str) -> list[HorseProfile]:
             breeder=_text(cell.select_one("p.breeder")) or None,
             horse_weight=horse_weight,
             weight_diff=weight_diff,
+            jockey_id=jockey_id,
+            kinryo_mark=kinryo_mark,
         ))
     if not profiles:
         raise LayoutError("出馬表から馬が1頭も読めませんでした")

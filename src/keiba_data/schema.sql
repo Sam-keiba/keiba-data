@@ -75,9 +75,27 @@ CREATE TABLE IF NOT EXISTS jockeys (
 
 CREATE TABLE IF NOT EXISTS trainers (
     trainer_id   TEXT PRIMARY KEY,
-    trainer_name TEXT,
+    trainer_name TEXT,                    -- netkeibaの表記。**4文字で切れている**（「中内田充」）
     stable       TEXT,                    -- 美浦/栗東/地方/海外
-    updated_at   TEXT NOT NULL
+    updated_at   TEXT NOT NULL,
+    -- JRAの調教師名鑑（`keiba-data trainer-meikan`）から。名鑑に載る現役の調教師だけ埋まる
+    full_name         TEXT,               -- 正式名（「中内田 充正」。姓と名の間に空白）
+    kana              TEXT,               -- 読み（「ナカウチダ ミツマサ」）
+    birth_date        TEXT,               -- 'YYYY-MM-DD'
+    license_year      INTEGER,            -- 調教師免許の取得年（開業年の目安）
+    meikan_updated_at TEXT                -- 名鑑で最後に見た日時（古いままなら引退した可能性）
+);
+
+-- 調教師別の貸付馬房数（JRAが毎年2〜3月に発表するPDF。`keiba-data trainer-stalls-import`）。
+-- PDFはスキャン画像なので、人が確かめたCSVから入れる。effective_date はその馬房数が効く日（発表の「3月4日から」）
+CREATE TABLE IF NOT EXISTS trainer_stalls (
+    trainer_id     TEXT NOT NULL REFERENCES trainers(trainer_id),
+    effective_date TEXT NOT NULL,         -- 'YYYY-MM-DD'
+    stalls         INTEGER NOT NULL,      -- 貸付馬房数
+    stable         TEXT NOT NULL,         -- 美浦/栗東（発表の区分）
+    name_in_source TEXT NOT NULL,         -- 発表に載っていた名前（照合の確かめ用）
+    updated_at     TEXT NOT NULL,
+    PRIMARY KEY (trainer_id, effective_date)
 );
 
 CREATE TABLE IF NOT EXISTS owners (
@@ -103,6 +121,9 @@ CREATE TABLE IF NOT EXISTS entries (
     -- Targetを書き出した時点の馬主（target_horses.owner_code）。**レース当時ではない**
     -- （2023年の走で約3%、転売された馬で owner_id と食い違う）。owner_id が空の走の代用に使う
     owner_id_at_export TEXT REFERENCES owners(owner_id),
+    -- 減量騎手の印（▲△☆◇★。減量の無い騎乗はNULL）。Targetの書き出し（target_runs）から写し、
+    -- それより後の走はJRAの出馬表（upcoming_entries）から写す（db.fill_kinryo_marks）
+    kinryo_mark  TEXT,
     PRIMARY KEY (race_id, umaban)
 );
 CREATE INDEX IF NOT EXISTS idx_entries_horse ON entries(horse_id);
@@ -249,6 +270,8 @@ CREATE TABLE IF NOT EXISTS upcoming_entries (
     horse_weight INTEGER,                 -- 当日発表。前日までは空
     weight_diff  INTEGER,
     status       TEXT,                    -- 取消/除外。通常はNULL
+    -- 減量騎手の印（JRAの出馬表から）。**この行の jockey_id の騎手の印**で、騎手が替われば消す
+    kinryo_mark  TEXT,
     PRIMARY KEY (race_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_upcoming_entries_horse ON upcoming_entries(horse_id);

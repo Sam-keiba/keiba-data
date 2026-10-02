@@ -26,7 +26,7 @@ from keiba_data.cushion import TrackCondition
 from keiba_data.html_store import HtmlStore
 from keiba_data.race_id import decode_race_id
 from keiba_data.scrapers import (
-    LayoutError, baba, jra_horse, jra_odds, jra_result, jra_sire, netkeiba_ped,
+    LayoutError, baba, jra_horse, jra_odds, jra_result, jra_sire, jra_trainer, netkeiba_ped,
 )
 from keiba_data.scrapers.calendar import parse_calendar
 from keiba_data.scrapers.race_list import parse_race_list, parse_race_list_details
@@ -694,6 +694,7 @@ class Updater:
             return None
         saved = db.save_horse_profiles(self.conn, race_id, profiles)
         weights = db.save_upcoming_weights(self.conn, race_id, profiles)
+        db.save_upcoming_kinryo_marks(self.conn, race_id, profiles)
         logger.info("JRA出馬表 %s: %d頭（馬体重 %d頭）", race_id, saved, weights)
         return saved
 
@@ -1205,6 +1206,50 @@ class Updater:
         logger.info("種牡馬リーディング(%s)のリンク: %d年ぶん（%s〜%s）", kind, len(links),
                     min(links, default="-"), max(links, default="-"))
         return links
+
+    # --- 調教師名鑑（JRA公式） ----------------------------------------------------
+
+    def fetch_trainer_meikan(self) -> list[str]:
+        """現役の調教師全員の正式名・読み・生年月日・免許取得年を名鑑から取り込む。
+
+        入口1回＋行ごとの一覧10回＋1人1回（約190人）。保存した調教師の trainer_id を返す。
+        """
+        try:
+            index_html = self.client.get_text(config.JRA_TRAINER_INDEX_URL,
+                                              encoding=config.JRA_RESULT_ENCODING)
+        except requests.RequestException as exc:
+            logger.error("調教師名鑑の入口の取得に失敗しました: %s", exc)
+            return []
+        list_cnames = jra_trainer.parse_list_cnames(index_html or "")
+        if not list_cnames:
+            self._warn("jra_trainer_index", config.JRA_TRAINER_INDEX_URL,
+                       "調教師名鑑の入口に、行ごとの一覧へのリンクがありません")
+            return []
+
+        links: dict[str, jra_trainer.TrainerLink] = {}
+        for i, cname in enumerate(list_cnames, 1):
+            html = self._jra_page(cname, "jra_trainer_list", str(i), url=config.JRA_TRAINER_URL)
+            for link in jra_trainer.parse_trainer_links(html or ""):
+                links.setdefault(link.trainer_id, link)
+        if not links:
+            self._warn("jra_trainer_list", config.JRA_TRAINER_URL, "調教師の一覧から1人も読めませんでした")
+            return []
+        logger.info("調教師名鑑: 現役%d人", len(links))
+
+        saved: list[str] = []
+        for link in links.values():
+            html = self._jra_page(link.cname, "jra_trainer", link.trainer_id, url=config.JRA_TRAINER_URL)
+            if not html:
+                continue
+            try:
+                profile = jra_trainer.parse_trainer_profile(html, link.trainer_id)
+            except LayoutError as exc:
+                self._warn(f"trainer:{link.trainer_id}", config.JRA_TRAINER_URL, str(exc))
+                continue
+            db.save_trainer_profile(self.conn, profile)
+            saved.append(profile.trainer_id)
+        self.n_races_saved += len(saved)       # 実行履歴の「保存件数」は人数で数える
+        return saved
 
     # --- 未開催レースの出馬表 -------------------------------------------------
 

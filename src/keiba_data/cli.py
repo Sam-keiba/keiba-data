@@ -29,7 +29,9 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from keiba_data import bloodline_local, config, cushion, db, publish as publish_module, sire_keys, target_import
+from keiba_data import (
+    bloodline_local, config, cushion, db, publish as publish_module, sire_keys, target_import, trainer_stalls,
+)
 from keiba_data.html_store import HtmlStore
 from keiba_data.http import BlockedError, PoliteSession, RequestBudgetExceeded
 from keiba_data.scrapers import jra_odds, jra_sire
@@ -106,6 +108,8 @@ def _run(args: argparse.Namespace) -> int:
             _fetch_odds(updater, args)
         elif args.command == "sire-fetch":
             _fetch_sire(updater, args)
+        elif args.command == "trainer-meikan":
+            _fetch_trainer_meikan(conn, updater)
         elif args.command == "pedigree":
             _fetch_pedigree(conn, updater, args)
         elif args.command == "bloodline":
@@ -358,6 +362,43 @@ def _fetch_sire(updater: Updater, args: argparse.Namespace) -> None:
     logger.info("種牡馬リーディング: %d〜%d年 / %d頭ぶんを保存しました", start, end, saved)
 
 
+def _fetch_trainer_meikan(conn, updater: Updater) -> None:
+    """現役の調教師の正式名・読み・生年月日・免許取得年をJRAの調教師名鑑から取り込む。"""
+    saved = updater.fetch_trainer_meikan()
+    logger.info("調教師名鑑: %d人を保存しました", len(saved))
+    # 結果ページに名前が出てこない＝まだ1走もしていない（新規開業など）の人は、行ごと足している
+    fresh = [f"{r['trainer_id']} {r['full_name']}" for r in conn.execute(
+        "SELECT trainer_id, full_name FROM trainers WHERE meikan_updated_at IS NOT NULL "
+        "AND trainer_name IS NULL ORDER BY trainer_id")]
+    if fresh:
+        logger.info("出走の記録がまだ無い調教師（%d人）: %s", len(fresh), "、".join(fresh))
+
+
+def _trainer_stalls_import(args: argparse.Namespace) -> int:
+    """調教師別の貸付馬房数を、人が確かめたCSVから取り込む（ネットにアクセスしない）。"""
+    conn = db.connect(config.DB_PATH)
+    code = EXIT_OK
+    try:
+        for path in args.csv:
+            try:
+                result = trainer_stalls.import_csv(conn, path)
+            except (OSError, ValueError) as exc:
+                logger.error("%s", exc)
+                code = EXIT_FAILED
+                continue
+            for (day, stable), total in sorted(result.totals.items()):
+                print(f"{path.name}: {day} {stable} 馬房数の合計 {total:,}")
+            print(f"{path.name}: {result.rows}行中 {result.saved}人を保存")
+            if result.unmatched:
+                code = EXIT_FAILED
+                print(f"結びつかなかった名前（{len(result.unmatched)}行。取り込んでいません）:")
+                for row in result.unmatched:
+                    print(f"  {row['stable']} {row['name']} {row['stalls']}  … {row['reason']}")
+    finally:
+        conn.close()
+    return code
+
+
 def _fetch_pedigree(conn, updater: Updater, args: argparse.Namespace) -> None:
     """馬の父・母・母の父をJRA公式の競走馬検索から取り込む。
 
@@ -607,6 +648,17 @@ def build_parser() -> argparse.ArgumentParser:
                               help="all=全馬 / two=2歳")
     add_fetch_options(p_sire_fetch)
     p_sire_fetch.set_defaults(func=_run, max_requests=None)
+
+    p_trainer = sub.add_parser(
+        "trainer-meikan", help="現役の調教師の正式名・読み・生年月日・免許取得年をJRAの調教師名鑑から取り込む")
+    add_fetch_options(p_trainer)
+    p_trainer.set_defaults(func=_run, max_requests=None)
+
+    p_stalls = sub.add_parser(
+        "trainer-stalls-import",
+        help="調教師別の貸付馬房数を、確かめたCSV（effective_date,stable,name,stalls）から取り込む")
+    p_stalls.add_argument("csv", type=Path, nargs="+", help="CSVファイル（例 data/trainer_stalls/2026-03-04.csv）")
+    p_stalls.set_defaults(func=_trainer_stalls_import)
 
     p_publish = sub.add_parser(
         "publish", help="閲覧用DBを作ってGitHubのリリースへ上げる（クラウド版に反映）")

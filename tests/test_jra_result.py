@@ -228,6 +228,18 @@ def test_parse_shutuba_profiles():
     assert [p.umaban for p in profiles] == list(range(1, 16))
 
 
+def test_parse_shutuba_profiles_reads_the_jockey_and_the_apprentice_mark():
+    """騎手コード（= jockeys.jockey_id）と減量騎手の印。netkeibaの結果ページには印が無い。"""
+    profiles = parse_shutuba_profiles(shutuba_html())
+    marks = {p.umaban: (p.jockey_id, p.kinryo_mark) for p in profiles}
+    assert marks[1] == ("01091", None)
+    assert marks[3] == ("01214", "☆")
+    assert marks[5] == ("01206", "◇")
+    assert marks[7] == ("01209", "△")
+    assert marks[12] == ("01207", "▲")
+    assert marks[8] == ("05339", None)              # 短期免許の外国人騎手
+
+
 def test_parse_shutuba_profiles_reads_the_horse_weight():
     """馬体重は当日発表。JRA公式の出馬表にしか無いので、ここから読む。"""
     profiles = parse_shutuba_profiles(shutuba_html())
