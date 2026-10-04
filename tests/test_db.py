@@ -769,3 +769,37 @@ def test_the_way_of_buying_is_kept_with_the_slip(conn):
         _slip("tansho", ["7"]),                       # 買い方が無くても保存できる
     ])
     assert [g["kind"] for g in db.get_bet_slips(conn, "R1")] == ["ながし", "ボックス", None]
+
+
+# --- 予想ボード・買い目の整形（SQLiteと共有ストアで共通） --------------------------
+
+
+def test_board_record_keeps_only_touched_horses():
+    assert db.board_record({"horse_id": "h1"}) is None                       # 手を入れていない
+    assert db.board_record({"horse_id": None, "is_manual": True}) is None    # 馬IDが無い
+    moved = db.board_record({"horse_id": "h1", "tier": "A", "position": 0.7,
+                             "lane_offset": 1, "is_manual": True})
+    assert moved == {"horse_id": "h1", "tier": "A", "position": 0.7, "lane_offset": 1,
+                     "comment": None, "is_manual": 1, "is_excluded": 0}
+
+
+def test_board_record_drops_the_position_unless_moved_by_hand():
+    """消しただけ・コメントだけの馬は位置を残さない（残すと全馬の位置がずれる）。"""
+    crossed = db.board_record({"horse_id": "h2", "tier": "B", "position": 0.3, "is_excluded": True})
+    assert crossed["tier"] is None and crossed["position"] is None and crossed["is_excluded"] == 1
+    noted = db.board_record({"horse_id": "h3", "tier": "C", "comment": "  掛かる  "})
+    assert noted["comment"] == "掛かる" and noted["tier"] is None and noted["is_manual"] == 0
+
+
+def test_normalize_slip_groups_checks_the_shape():
+    groups = db.normalize_slip_groups([
+        {"bet": "umaren", "combos": ["1-2", "1-2", "bad", "3-4"], "amount": 200, "kind": " ながし "},
+        {"bet": "unknown", "combos": ["1"]},                  # 知らない券種
+        {"bet": "tansho", "combos": []},                      # 組み合わせが空
+        {"bet": "tansho", "combos": [7], "amount": -100},     # 負の金額は0
+    ])
+    assert groups == [
+        {"bet": "umaren", "combos": ["1-2", "3-4"], "amount": 200, "kind": "ながし"},
+        {"bet": "tansho", "combos": ["7"], "amount": 0, "kind": None},
+    ]
+    assert db.normalize_slip_groups(None) == []

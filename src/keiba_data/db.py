@@ -821,12 +821,41 @@ BOARD_COLUMNS = (
 )
 
 
+def board_record(row: dict) -> dict | None:
+    """画面から届いた1頭ぶんを、保存する形に整える。**保存しない馬は None**。
+
+    手を入れていない馬（動かしてもいない・コメントも無い・消してもいない）は保存しない。
+    位置（Tier・横位置・段）は**手で動かした馬のときだけ**覚える。
+    消しただけ・コメントだけの馬にも位置を残すと、次に開いたときに
+    「保存済みの引き伸ばし後の値」と「他の馬の生の値」が混ざり、
+    そこからもう一度引き伸ばされて**全馬の位置がずれる**。
+
+    SQLite（save_board）と共有ストア（keiba-app の同期）の両方がこの判定を使う。
+    """
+    touched = (
+        row.get("is_manual")
+        or row.get("is_excluded")          # 消しただけの馬も残す
+        or (row.get("comment") or "").strip()
+    )
+    if not row.get("horse_id") or not touched:
+        return None
+    placed = bool(row.get("is_manual"))
+    return {
+        "horse_id": row["horse_id"],
+        "tier": row.get("tier") if placed else None,
+        "position": row.get("position") if placed else None,
+        "lane_offset": row.get("lane_offset") if placed else None,
+        "comment": (row.get("comment") or "").strip() or None,
+        "is_manual": 1 if placed else 0,
+        "is_excluded": 1 if row.get("is_excluded") else 0,
+    }
+
+
 def save_board(conn: sqlite3.Connection, race_id: str, rows: list[dict]) -> int:
     """予想ボードの配置とコメントを保存する（レース×馬で1行）。保存した件数を返す。
 
     画面の「保存」を押したときに、そのレースの全馬ぶんをまとめて受け取る。
-    手を入れていない馬（動かしてもいない・コメントも無い・消してもいない）は
-    **保存しない**。位置は**手で動かした馬のときだけ**保存する（下記）。
+    残すかどうか・何を残すかは `board_record` が決める。
     自動仮配置は開くたびに最新のデータで作り直したいので、
     DBに残すのは「手を入れた結果」だけにしている。
     """
@@ -836,28 +865,14 @@ def save_board(conn: sqlite3.Connection, race_id: str, rows: list[dict]) -> int:
         horse_id = row.get("horse_id")
         if not horse_id:
             continue
-        touched = (
-            row.get("is_manual")
-            or row.get("is_excluded")          # 消しただけの馬も残す
-            or (row.get("comment") or "").strip()
-        )
-        if touched:
-            # 位置（Tier・横位置・段）は**手で動かした馬のときだけ**覚える。
-            # 消しただけ・コメントだけの馬にも位置を残すと、次に開いたときに
-            # 「保存済みの引き伸ばし後の値」と「他の馬の生の値」が混ざり、
-            # そこからもう一度引き伸ばされて**全馬の位置がずれる**。
-            placed = bool(row.get("is_manual"))
-            keep.append([
-                race_id, horse_id,
-                row.get("tier") if placed else None,
-                row.get("position") if placed else None,
-                row.get("lane_offset") if placed else None,
-                (row.get("comment") or "").strip() or None,
-                1 if placed else 0,
-                1 if row.get("is_excluded") else 0, now,
-            ])
-        else:
+        record = board_record(row)
+        if record is None:
             drop.append((race_id, horse_id))
+            continue
+        keep.append([
+            race_id, horse_id, record["tier"], record["position"], record["lane_offset"],
+            record["comment"], record["is_manual"], record["is_excluded"], now,
+        ])
     columns = BOARD_COLUMNS + ("updated_at",)
     updates = ", ".join(f"{c} = excluded.{c}" for c in columns if c not in ("race_id", "horse_id"))
     with conn:
@@ -967,37 +982,48 @@ BET_SLIP_COLUMNS = ("race_id", "group_id", "bet_type", "combo", "amount_yen", "k
 _COMBO_RE = re.compile(r"^\d+(-\d+)*$")
 
 
-def save_bet_slips(conn: sqlite3.Connection, race_id: str, groups: list[dict]) -> int:
-    """そのレースの買い目を**まるごと入れ替える**。残ったまとまりの数を返す。
+def normalize_slip_groups(groups: list[dict] | None) -> list[dict]:
+    """画面から届いた買い目を、保存する形に整える（ブラウザから届く値なので形を確かめて捨てる）。
 
-    画面から届くのは「いま右カラムに積まれているすべて」なので、消した買い目が
-    残らないよう、いったん消してから入れ直す（オッズと同じ考え方）。
-
-    `groups` の形は
-    `[{"bet": "umaren", "combos": ["1-2"], "amount": 100, "kind": "ながし"}, …]`。
-    `kind` は買い方（通常 / フォーメーション / ながし / ボックス）で、無くてもよい。
-    金額は**1点あたり**。番号（group_id）は**受け取った並びで振り直す**ので、
-    画面側が同じ番号を2つ送ってきても主キーがぶつからない。
-    ブラウザから届く値なので、券種と組み合わせの形だけ確かめて捨てる。
+    `[{"bet": "umaren", "combos": ["1-2"], "amount": 100, "kind": "ながし"}, …]` を返す。
+    券種が知らないもの・組み合わせが空のまとまりは捨て、同じ組み合わせは1つにする。
+    金額は**1点あたり**で、負の値は0にする。SQLiteと共有ストアの両方が使う。
     """
     known = {bet.key for bet in BET_TYPES}
-    now, rows, kept = now_str(), [], 0
+    out = []
     for group in groups or []:
         bet_type = group.get("bet")
         combos = [str(c) for c in (group.get("combos") or []) if _COMBO_RE.match(str(c))]
         if bet_type not in known or not combos:
             continue
-        amount = max(0, int(group.get("amount") or 0))
-        kept += 1
-        group_id = kept
-        kind = (group.get("kind") or "").strip() or None
-        for seq, combo in enumerate(dict.fromkeys(combos)):   # 同じ組み合わせは1つに
-            rows.append((race_id, group_id, bet_type, combo, amount, kind, seq, now))
+        out.append({
+            "bet": bet_type,
+            "combos": list(dict.fromkeys(combos)),          # 同じ組み合わせは1つに
+            "amount": max(0, int(group.get("amount") or 0)),
+            "kind": (group.get("kind") or "").strip() or None,
+        })
+    return out
+
+
+def save_bet_slips(conn: sqlite3.Connection, race_id: str, groups: list[dict]) -> int:
+    """そのレースの買い目を**まるごと入れ替える**。残ったまとまりの数を返す。
+
+    画面から届くのは「いま右カラムに積まれているすべて」なので、消した買い目が
+    残らないよう、いったん消してから入れ直す（オッズと同じ考え方）。
+    形の確かめは `normalize_slip_groups`。`kind` は買い方（通常 / フォーメーション /
+    ながし / ボックス）で、無くてもよい。番号（group_id）は**受け取った並びで振り直す**ので、
+    画面側が同じ番号を2つ送ってきても主キーがぶつからない。
+    """
+    now, rows = now_str(), []
+    kept = normalize_slip_groups(groups)
+    for group_id, group in enumerate(kept, start=1):
+        for seq, combo in enumerate(group["combos"]):
+            rows.append((race_id, group_id, group["bet"], combo, group["amount"], group["kind"], seq, now))
     with conn:
         conn.execute("DELETE FROM bet_slips WHERE race_id = ?", (race_id,))
         if rows:
             conn.executemany(_insert_sql("bet_slips", BET_SLIP_COLUMNS + ("updated_at",)), rows)
-    return kept
+    return len(kept)
 
 
 def get_bet_slips(conn: sqlite3.Connection, race_id: str) -> list[dict]:
