@@ -897,8 +897,8 @@ def clear_board(conn: sqlite3.Connection, race_id: str) -> int:
 
 # --- 予想印 ---------------------------------------------------------------------
 
-# 付けられる印（この順が「印順」の並び）
-MARKS = ("◎", "○", "▲", "△", "☆", "✓")
+# 付けられる印（この順が「印順」の並び）。「消」は買わない馬（画面ではグレーにする）
+MARKS = ("◎", "○", "▲", "△", "☆", "✓", "消")
 
 
 def get_marks(conn: sqlite3.Connection, race_id: str) -> dict[str, str]:

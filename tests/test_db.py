@@ -549,8 +549,15 @@ def test_removing_a_mark_deletes_its_row(conn):
     db.save_mark(conn, "R1", "h1", "◎")
     db.save_mark(conn, "R1", "h1", None)
     db.save_mark(conn, "R1", "h2", "--")          # 外す印は保存しない
+    db.save_mark(conn, "R1", "h3", "?")           # 知らない印も保存しない
     assert db.get_marks(conn, "R1") == {}
     assert conn.execute("SELECT COUNT(*) FROM horse_marks").fetchone()[0] == 0
+
+
+def test_the_erase_mark_is_kept(conn):
+    """「消」は印を外すのではなく、買わない馬の印として残す。"""
+    db.save_mark(conn, "R1", "h1", "消")
+    assert db.get_marks(conn, "R1") == {"h1": "消"}
 
 
 def test_marks_do_not_mix_between_races(conn):
