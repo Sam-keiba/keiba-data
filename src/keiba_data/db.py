@@ -40,6 +40,7 @@ LAP_COLUMNS = ("race_id", "seq", "distance_m", "lap_sec")
 DATA_TABLES = (
     "races", "entries", "results", "payouts", "race_laps", "horses", "jockeys", "trainers", "owners",
     "upcoming_races", "upcoming_entries", "track_conditions", "board_horses", "bet_slips",
+    "horse_marks",
 )
 
 
@@ -892,6 +893,34 @@ def clear_board(conn: sqlite3.Connection, race_id: str) -> int:
     with conn:
         cursor = conn.execute("DELETE FROM board_horses WHERE race_id = ?", (race_id,))
     return cursor.rowcount
+
+
+# --- 予想印 ---------------------------------------------------------------------
+
+# 付けられる印（この順が「印順」の並び）
+MARKS = ("◎", "○", "▲", "△", "☆", "✓")
+
+
+def get_marks(conn: sqlite3.Connection, race_id: str) -> dict[str, str]:
+    """そのレースの予想印 `{馬ID: 印}`（印を付けた馬だけ）。"""
+    rows = conn.execute("SELECT horse_id, mark FROM horse_marks WHERE race_id = ?", (race_id,))
+    return {r["horse_id"]: r["mark"] for r in rows}
+
+
+def save_mark(conn: sqlite3.Connection, race_id: str, horse_id: str, mark: str | None) -> None:
+    """1頭の予想印を付ける。`MARKS` に無い印（None・「--」など）は外す（行ごと消す）。"""
+    with conn:
+        if mark not in MARKS:
+            conn.execute(
+                "DELETE FROM horse_marks WHERE race_id = ? AND horse_id = ?", (race_id, horse_id)
+            )
+            return
+        conn.execute(
+            "INSERT INTO horse_marks (race_id, horse_id, mark, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(race_id, horse_id) DO UPDATE SET "
+            "mark = excluded.mark, updated_at = excluded.updated_at",
+            (race_id, horse_id, mark, now_str()),
+        )
 
 
 # --- オッズ（JRA公式） ---------------------------------------------------------

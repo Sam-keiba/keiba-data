@@ -317,6 +317,15 @@ CREATE TABLE IF NOT EXISTS board_horses (
     PRIMARY KEY (race_id, horse_id)
 );
 
+-- 予想印（◎○▲△☆✓）。印を付けた馬だけ1行（外したら行ごと消す）。
+CREATE TABLE IF NOT EXISTS horse_marks (
+    race_id    TEXT NOT NULL,
+    horse_id   TEXT NOT NULL,
+    mark       TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (race_id, horse_id)
+);
+
 
 -- JRA公式のオッズ（単勝〜3連単）。**最新だけ**を残す（取り込むたび入れ替え）。
 -- combo は組み合わせを `-` でつないだ文字列。着順を見ない券種（馬連・ワイド・枠連・3連複）は

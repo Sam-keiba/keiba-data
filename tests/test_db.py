@@ -535,6 +535,31 @@ def test_blank_comments_are_not_stored(conn):
     assert conn.execute("SELECT comment FROM board_horses").fetchone()[0] is None
 
 
+# --- 予想印 ---------------------------------------------------------------------
+
+
+def test_marks_are_saved_and_overwritten(conn):
+    db.save_mark(conn, "R1", "h1", "◎")
+    db.save_mark(conn, "R1", "h2", "▲")
+    db.save_mark(conn, "R1", "h1", "○")
+    assert db.get_marks(conn, "R1") == {"h1": "○", "h2": "▲"}
+
+
+def test_removing_a_mark_deletes_its_row(conn):
+    db.save_mark(conn, "R1", "h1", "◎")
+    db.save_mark(conn, "R1", "h1", None)
+    db.save_mark(conn, "R1", "h2", "--")          # 外す印は保存しない
+    assert db.get_marks(conn, "R1") == {}
+    assert conn.execute("SELECT COUNT(*) FROM horse_marks").fetchone()[0] == 0
+
+
+def test_marks_do_not_mix_between_races(conn):
+    db.save_mark(conn, "R1", "h1", "◎")
+    db.save_mark(conn, "R2", "h1", "✓")
+    assert db.get_marks(conn, "R1") == {"h1": "◎"}
+    assert db.get_marks(conn, "R2") == {"h1": "✓"}
+
+
 def test_winner_corner_survives_a_netkeiba_import(conn):
     """勝ち馬の通過順位（JRA由来）は、netkeibaの結果を入れ直しても消えない。
 
