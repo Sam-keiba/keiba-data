@@ -34,6 +34,10 @@ CREATE TABLE IF NOT EXISTS races (
     n_runners       INTEGER,              -- 出走頭数（取消・除外を除く）
     jra_cname       TEXT,                 -- JRA公式のレース結果ページのトークン（馬柱の映像リンクに使う）
     winner_corner   TEXT,                 -- 勝ち馬のコーナー通過順位（JRA公式由来。開催の傾向表示に使う）
+    winner_umaban   INTEGER,              -- 勝ち馬の馬番（JRA公式由来。開催の勝ちタイム一覧に出す）
+    winner_waku     INTEGER,              -- 勝ち馬の枠番（同上）
+    winner_name     TEXT,                 -- 勝ち馬の馬名（同上）
+    winner_last_3f  REAL,                 -- 勝ち馬の上り3F（同上）
     fetched_at      TEXT NOT NULL,        -- 最初に保存した日時
     updated_at      TEXT NOT NULL,        -- 最後に保存した日時
     source          TEXT NOT NULL DEFAULT 'scrape', -- scrape=netkeiba/JRA公式 / target=Target（target-import）で作った行

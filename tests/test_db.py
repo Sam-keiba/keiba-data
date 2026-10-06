@@ -584,6 +584,19 @@ def test_winner_corner_survives_a_netkeiba_import(conn):
     ).fetchone()[0] == "1-1-1-1"
 
 
+def test_the_jra_winner_survives_a_netkeiba_import(conn):
+    """勝ち馬の馬番・枠・馬名・上り3F（JRA由来）も、netkeibaの結果を入れ直しても消えない。"""
+    page = _page()
+    winner = {"winner_umaban": 8, "winner_waku": 5, "winner_name": "ウィンターブリーズ", "winner_last_3f": 37.5}
+    db.save_jra_race(conn, {**page.race, **winner}, page.laps)
+    db.save_race_page(conn, page)
+    row = conn.execute(
+        "SELECT winner_umaban, winner_waku, winner_name, winner_last_3f FROM races WHERE race_id = ?",
+        (page.race["race_id"],),
+    ).fetchone()
+    assert tuple(row) == (8, 5, "ウィンターブリーズ", 37.5)
+
+
 def test_save_jra_race_without_a_winner_corner(conn):
     """通過順位が読めなくても、レースとラップの取り込みは止めない。"""
     page = _page()

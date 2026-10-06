@@ -37,6 +37,12 @@ RESULT_COLUMNS = (
 PAYOUT_COLUMNS = ("race_id", "bet_type", "combination", "payout_yen", "popularity")
 LAP_COLUMNS = ("race_id", "seq", "distance_m", "lap_sec")
 
+# JRA公式の結果ページから取る勝ち馬の値（races の列。netkeibaの取り込みでは触らない）
+JRA_WINNER_COLUMNS = (
+    ("winner_umaban", "INTEGER"), ("winner_waku", "INTEGER"),
+    ("winner_name", "TEXT"), ("winner_last_3f", "REAL"),
+)
+
 DATA_TABLES = (
     "races", "entries", "results", "payouts", "race_laps", "horses", "jockeys", "trainers", "owners",
     "upcoming_races", "upcoming_entries", "track_conditions", "board_horses", "bet_slips",
@@ -106,6 +112,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if "winner_corner" not in columns:
             conn.execute("ALTER TABLE races ADD COLUMN winner_corner TEXT")
             conn.commit()
+        # 勝ち馬の馬番・枠・馬名・上り3F（JRA公式由来）。開催の勝ちタイム一覧に出す
+        for column, kind in JRA_WINNER_COLUMNS:
+            if column not in columns:
+                conn.execute(f"ALTER TABLE races ADD COLUMN {column} {kind}")
+                conn.commit()
     # Target（`target-import`）で作った行と見分ける出所。定数の既定値なので、
     # 既存の行は書き換えずに 'scrape' として読める
     for table in ("races", "horses"):
@@ -294,7 +305,7 @@ def save_jra_race(conn: sqlite3.Connection, race: dict, laps: list[dict]) -> Non
     ts = now_str()
     # winner_corner は RACE_COLUMNS の外（netkeibaの取り込みでは触らない列）なので、
     # jra_cname と同じく、あとから結果を入れ直しても消えない。
-    saved_columns = RACE_COLUMNS + ("winner_corner",)
+    saved_columns = RACE_COLUMNS + ("winner_corner",) + tuple(c for c, _ in JRA_WINNER_COLUMNS)
     columns = saved_columns + ("fetched_at", "updated_at")
     updates = ", ".join(
         f"{c} = COALESCE(excluded.{c}, {c})" for c in saved_columns if c != "race_id"

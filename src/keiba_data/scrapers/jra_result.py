@@ -414,6 +414,30 @@ def _runner_count(unit: Tag) -> int | None:
     return sum(1 for p in places if p not in _NON_STARTERS)
 
 
+_WAKU_ALT_RE = re.compile(r"枠(\d)")
+
+
+def _winner(unit: Tag) -> dict:
+    """勝ち馬の馬番・枠・馬名・上り3F（開催の勝ちタイム一覧に出す）。読めない値は None。
+
+    馬ごとの結果はDBに入れない方針（JRAは馬のnetkeiba IDを持たないため）なので、
+    勝ち馬のぶんだけをレースの列として持つ（winner_corner と同じ考え方）。
+    """
+    for row in unit.select("tr"):
+        place = row.select_one("td.place")
+        if place is None or _text(place) != "1":
+            continue
+        waku_img = row.select_one("td.waku img")
+        waku = _WAKU_ALT_RE.search(waku_img.get("alt", "")) if waku_img else None
+        return {
+            "winner_umaban": parsing.to_int(_text(row.select_one("td.num"))),
+            "winner_waku": int(waku.group(1)) if waku else None,
+            "winner_name": _text(row.select_one("td.horse")) or None,
+            "winner_last_3f": parsing.to_float(_text(row.select_one("td.f_time"))),
+        }
+    return {"winner_umaban": None, "winner_waku": None, "winner_name": None, "winner_last_3f": None}
+
+
 def _winner_corner(unit: Tag) -> str | None:
     """勝ち馬のコーナー通過順位（`1-1-1-1`）。読めなければ None。
 
@@ -501,6 +525,7 @@ def _parse_unit(unit: Tag, meeting: Meeting) -> JraRace | None:
         "n_runners": n_runners,
         # 勝ち馬の脚質を出すためだけの値（馬ごとの結果は入れない）
         "winner_corner": _winner_corner(unit),
+        **_winner(unit),
     }
     race.update(_parse_going(unit))
     race.update(_parse_course(_text(unit.select_one("div.cell.course")), jump, warnings))

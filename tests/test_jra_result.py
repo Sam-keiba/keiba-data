@@ -86,6 +86,7 @@ def test_parse_meeting_results_reads_race_and_laps():
         "n_runners": 15, "weather": "雨", "going_turf": None, "going_dirt": "不良",
         "surface": "dirt", "direction": "right", "distance_m": 1800, "course_detail": None,
         "winner_corner": "2-2-2-1",
+        "winner_umaban": 8, "winner_waku": 5, "winner_name": "ウィンターブリーズ", "winner_last_3f": 37.5,
     }
 
     laps = races[0].laps
@@ -331,3 +332,14 @@ def test_a_race_without_a_result_row_has_no_winner_corner():
     unit = BeautifulSoup("<div><tr><td class='place'>取消</td></tr></div>", "lxml")
     assert _winner_corner(unit) is None
     assert _winner_corner(BeautifulSoup("<div></div>", "lxml")) is None
+
+
+def test_the_winner_number_name_and_last_3f_are_read():
+    """開催の勝ちタイム一覧に出す勝ち馬の馬番・枠・馬名・上り3F（馬ごとの結果は入れない方針のまま）。"""
+    races = parse_meeting_results(nakayama_html(), NAKAYAMA)
+    read = [r for r in races if r.race["winner_umaban"] is not None]
+    assert len(read) >= len(races) - 1
+    for race in read:
+        assert 1 <= race.race["winner_waku"] <= 8
+        assert race.race["winner_name"]
+        assert race.race["winner_last_3f"] is None or 30 < race.race["winner_last_3f"] < 45
