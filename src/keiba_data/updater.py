@@ -256,6 +256,9 @@ class Updater:
                 start = floor
         logger.info("update: 対象期間 %s 〜 %s", start, self.today)
         self._run_range(start, self.today)
+        # 連休開催などで JRA結果の取り込み窓（当日・前日）を外れたレースのリンクを埋める。
+        # リンクが入っていない開催だけを回るので、揃っていれば何もしない。
+        self.fetch_jra_race_links(start, self.today)
 
     def run_backfill(self, start: date, end: date | None = None) -> None:
         end = min(end or self.today, self.today)
