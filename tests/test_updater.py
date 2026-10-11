@@ -116,9 +116,11 @@ def test_saved_html_is_reused_without_network(conn, store, tmp_path):
     assert db.table_counts(fresh)["races"] == 24
 
 
-def test_unavailable_result_on_race_day_is_not_completed(conn, store):
+def test_unavailable_result_on_race_day_is_not_completed(conn, store, monkeypatch):
     client = FakeClient(missing_race_ids={"202609040412"})
     updater = Updater(conn, client, store, today=DAY)  # 当日（最終レースが未確定）
+    # このテストはJRA公式のページを用意していないので、リンクの取り込みは外す
+    monkeypatch.setattr(updater, "fetch_jra_race_links", lambda *a, **k: 0)
     updater.sync_calendar(DAY, DAY)
     _only_day_13(conn)
     updater.run_update()
