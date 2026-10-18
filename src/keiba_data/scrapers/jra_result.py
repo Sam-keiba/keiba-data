@@ -353,11 +353,12 @@ def _parse_course(text: str, jump: bool, warnings: list[str]) -> dict:
 
 
 def _parse_grade(unit: Tag) -> str | None:
-    """グレードのアイコン（alt="GⅡ" / "J･GⅢ"）をnetkeiba表記（GII / JGIII）にする。"""
+    """グレードのアイコン（alt="GⅡ" / "J･GⅢ" / "リステッド"）をnetkeiba表記（GII / JGIII / L）にする。"""
     icon = unit.select_one("span.grade_icon img[alt]")
     if icon is None:
         return None
     grade = icon["alt"].translate(_GRADE_TRANS)
+    grade = "L" if grade == "リステッド" else grade   # リステッド競走はnetkeiba側と同じ「L」
     return grade or None
 
 

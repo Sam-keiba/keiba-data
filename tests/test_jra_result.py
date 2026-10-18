@@ -343,3 +343,11 @@ def test_the_winner_number_name_and_last_3f_are_read():
         assert 1 <= race.race["winner_waku"] <= 8
         assert race.race["winner_name"]
         assert race.race["winner_last_3f"] is None or 30 < race.race["winner_last_3f"] < 45
+
+
+def test_listed_race_icon_becomes_L():
+    from bs4 import BeautifulSoup
+    from keiba_data.scrapers.jra_result import _parse_grade
+
+    unit = BeautifulSoup('<div><span class="grade_icon"><img alt="リステッド"></span></div>', "html.parser").div
+    assert _parse_grade(unit) == "L"
