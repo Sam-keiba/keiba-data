@@ -991,7 +991,7 @@ class Updater:
 
     # --- 5代血統表（netkeiba） -------------------------------------------------
 
-    def fetch_bloodlines(self, limit_horses: int | None = None) -> int:
+    def fetch_bloodlines(self, limit_horses: int | None = None, *, recent_only: bool = False) -> int:
         """出走した馬の5代血統表を取り込む。**保存できた頭数**を返す。
 
         手元の `horse_id` が血統登録番号そのものなので、検索を挟まず
@@ -999,14 +999,22 @@ class Updater:
         あれば取りに行かない（`--force` で取り直せる）。
 
         途中で止まっても、次は血統表がまだ入っていない馬から始まるので続きから進む。
+        `recent_only` なら、最近の馬で血統表が1マスも無い馬だけにする（`refresh` 用）。
         """
-        pending = db.horses_without_bloodline(self.conn, limit_horses)
-        if not pending:
-            logger.info("5代血統表: 埋めるべき馬はありません")
-            return 0
-        done, total = db.count_bloodline(self.conn)
-        logger.info("5代血統表: %d頭/%d頭が済み。残り%d頭のうち%d頭を対象にします",
-                    done, total, total - done, len(pending))
+        if recent_only:
+            pending = db.recent_horses_without_bloodline(self.conn, limit=limit_horses)
+            if not pending:
+                logger.info("5代血統表: 最近の馬で埋めるべき馬はありません")
+                return 0
+            logger.info("5代血統表: 最近の馬で血統表が無い%d頭を対象にします", len(pending))
+        else:
+            pending = db.horses_without_bloodline(self.conn, limit_horses)
+            if not pending:
+                logger.info("5代血統表: 埋めるべき馬はありません")
+                return 0
+            done, total = db.count_bloodline(self.conn)
+            logger.info("5代血統表: %d頭/%d頭が済み。残り%d頭のうち%d頭を対象にします",
+                        done, total, total - done, len(pending))
 
         saved = 0
         for horse in pending:

@@ -1334,6 +1334,41 @@ def horses_without_bloodline(conn: sqlite3.Connection, limit: int | None = None)
     return [dict(r) for r in conn.execute(sql)]
 
 
+def recent_horses_without_bloodline(conn: sqlite3.Connection, since: str = "2023-01-01",
+                                    limit: int | None = None) -> list[dict]:
+    """最近の馬で、5代血統表が**1マスも無い**馬（`keiba-data bloodline --new` / `refresh` の対象）。
+
+    最近の馬＝`since` 以降に走った馬と、出馬表（upcoming_entries）に入っている馬。
+    `horses_without_bloodline` と違い、手元のデータで組んだ local の行がある馬も**済み**として扱う
+    （Target の horse_data から組めている馬を、わざわざ netkeiba に取りに行かない）。
+    残るのは、Target を書き出した後にデビューした新馬などで、毎週の更新で数分ぶんにしかならない。
+    """
+    sql = """
+        SELECT h.horse_id, h.horse_name
+          FROM horses h
+         WHERE (EXISTS (SELECT 1 FROM entries e JOIN races r ON r.race_id = e.race_id
+                         WHERE e.horse_id = h.horse_id AND r.race_date >= ?)
+                OR EXISTS (SELECT 1 FROM upcoming_entries u WHERE u.horse_id = h.horse_id))
+           AND NOT EXISTS (SELECT 1 FROM horse_ancestors a WHERE a.horse_id = h.horse_id)
+      ORDER BY h.horse_id DESC
+    """
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    return [dict(r) for r in conn.execute(sql, (since,))]
+
+
+def count_any_bloodline(conn: sqlite3.Connection) -> tuple[int, int]:
+    """(netkeiba か手元で組んだ5代血統表がある馬, 出走した馬の総数)。`status` の表示に使う。"""
+    row = conn.execute(
+        "SELECT COUNT(*) AS total, "
+        "       SUM(CASE WHEN EXISTS (SELECT 1 FROM horse_ancestors a WHERE a.horse_id = h.horse_id) "
+        "           THEN 1 ELSE 0 END) AS done "
+        "  FROM horses h "
+        " WHERE EXISTS (SELECT 1 FROM entries e WHERE e.horse_id = h.horse_id)"
+    ).fetchone()
+    return (row["done"] or 0, row["total"] or 0)
+
+
 def count_local_bloodline(conn: sqlite3.Connection) -> tuple[int, float]:
     """(手元のデータで組んだ5代血統表がある馬, 1頭あたりの平均マス数)。"""
     row = conn.execute(

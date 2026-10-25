@@ -1,6 +1,6 @@
 """CLIエントリポイント。
 
-  uv run keiba-data refresh                       update → entries → publish をまとめて実行（いつもの更新）
+  uv run keiba-data refresh                       update → entries → bloodline --new → publish をまとめて実行（いつもの更新）
   uv run keiba-data update                        前回の続き〜今日のレース結果を取得（週末のレース後に実行）
   uv run keiba-data backfill --from 2023-01-01    過去レースをさかのぼって取得（何回かに分けて実行）
   uv run keiba-data reparse                       保存済みHTMLからDBを作り直す（ネットにアクセスしない）
@@ -11,6 +11,7 @@
   uv run keiba-data cushion                       クッション値・含水率をJRA公式PDFから取り込む
   uv run keiba-data pedigree                      馬の父・母・母の父をJRA公式から取り込む（種牡馬分析の土台）
   uv run keiba-data bloodline                     5代血統表を取り込む（血統クロス分析の土台）
+  uv run keiba-data bloodline --new               最近の馬で血統表が無い馬だけ取り込む（新馬など。refresh でも流れる）
   uv run keiba-data bloodline-local               手元のデータだけで5代血統表を広げる（ネットにアクセスしない）
   uv run keiba-data sire-fetch                    種牡馬リーディング（AEI）をJRA公式から取り込む
   uv run keiba-data target-import                Targetから書き出したCSVを取り込む（足りない行と空欄だけを本体へ）
@@ -292,13 +293,16 @@ def _publish(args: argparse.Namespace) -> int:
 
 
 def _refresh(args: argparse.Namespace) -> int:
-    """いつもの更新: update → entries → publish を順に流す。
+    """いつもの更新: update → entries → bloodline --new → publish を順に流す。
 
     どれかが失敗・中断したら、そこで止めて上げない（半端なDBをクラウドに出さない）。
+    血統表がリクエスト上限に当たったときは一時停止（成功扱い）なので、そのまま上げる。
+    残りは次の refresh で続きから取る。
     """
     fetch = ["--interval", str(args.interval)]
     publish = ["--no-upload"] if args.no_upload else []
-    for argv in (["update", *fetch], ["entries", *fetch], ["publish", *publish]):
+    steps = (["update", *fetch], ["entries", *fetch], ["bloodline", "--new", *fetch], ["publish", *publish])
+    for argv in steps:
         step = build_parser().parse_args(argv)
         step.raw_args = " ".join(argv)
         code = step.func(step)
@@ -441,6 +445,12 @@ def _fetch_bloodline(conn, updater: Updater, args: argparse.Namespace) -> None:
     出走した馬は24,000頭を超えるので、何回かに分けて流す。
     **血統表がまだ入っていない馬から始まる**ので、同じコマンドで続きから進む。
     """
+    if args.new:
+        updater.fetch_bloodlines(args.horses, recent_only=True)
+        left = len(db.recent_horses_without_bloodline(conn))
+        logger.info("5代血統表（最近の馬）: 残り%d頭%s", left,
+                    "（`uv run keiba-data bloodline --new` をもう一度実行すると続きから進みます）" if left else "")
+        return
     before, total = db.count_bloodline(conn)
     updater.fetch_bloodlines(args.horses)
     after, _ = db.count_bloodline(conn)
@@ -526,7 +536,7 @@ def _print_backfill_progress(conn) -> None:
     """
     jobs = (
         ("血統（父・母・馬主・生産牧場）", db.count_pedigree(conn), "keiba-data pedigree"),
-        ("5代血統表（血統クロス）", db.count_bloodline(conn), "keiba-data bloodline"),
+        ("5代血統表（netkeibaから取ったもの）", db.count_bloodline(conn), "keiba-data bloodline"),
     )
     print("取り込みの進み具合:")
     for label, (done, total), command in jobs:
@@ -541,6 +551,17 @@ def _print_backfill_progress(conn) -> None:
     if local:
         print(f"  {'5代血統表（手元のデータで組んだもの）':<26} {local:,}頭 平均{avg_cells:.1f}/62マス"
               "（作り直し: uv run keiba-data bloodline-local）")
+    # netkeiba の残りは大半が1990年代の馬で、取らなくても困らない。見るべきはこちら
+    done, total = db.count_any_bloodline(conn)
+    percent = (done / total * 100) if total else 0.0
+    print(f"  {'5代血統表（どちらかがある馬）':<26} [{_bar(done, total)}] {done:>6,}/{total:,} ({percent:4.1f}%)")
+    recent = len(db.recent_horses_without_bloodline(conn))
+    if recent:
+        minutes = recent * config.REQUEST_INTERVAL_SEC / 60
+        print(f"  {'':<26}  2023年以降に走った馬・出馬表の馬で無いのは{recent:,}頭（約{minutes:.0f}分）"
+              "。次の refresh か uv run keiba-data bloodline --new で埋まります")
+    else:
+        print(f"  {'':<26}  2023年以降に走った馬・出馬表の馬はすべて揃っています")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -561,7 +582,7 @@ def build_parser() -> argparse.ArgumentParser:
             help="終わったらmacOSの通知を出す（血統の取り込みなど、何時間もかかるとき用）",
         )
 
-    p_refresh = sub.add_parser("refresh", help="update → entries → publish をまとめて実行する（いつもの更新）")
+    p_refresh = sub.add_parser("refresh", help="update → entries → bloodline --new → publish をまとめて実行する（いつもの更新）")
     p_refresh.add_argument(
         "--interval", type=float, default=config.REQUEST_INTERVAL_SEC,
         help=f"リクエスト間隔(秒)。デフォルト{config.REQUEST_INTERVAL_SEC}",
@@ -648,6 +669,10 @@ def build_parser() -> argparse.ArgumentParser:
         "bloodline", help="5代血統表を取り込む（血統クロス分析の土台）")
     p_bloodline.add_argument("--horses", type=int, default=None,
                              help="対象にする頭数（既定は全部。動作確認には --horses 20 が手ごろ）")
+    p_bloodline.add_argument(
+        "--new", action="store_true",
+        help="2023年以降に走った馬と出馬表の馬のうち、血統表が1マスも無い馬だけ（手元で組んだ馬は済み扱い）",
+    )
     p_bloodline.add_argument(
         "--max-requests", type=int, default=config.DEFAULT_BLOODLINE_MAX_REQUESTS,
         help=f"1回の実行で送るリクエスト数の上限（デフォルト{config.DEFAULT_BLOODLINE_MAX_REQUESTS}）",

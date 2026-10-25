@@ -80,3 +80,27 @@ def test_netkeiba_tree_replaces_local_rows(seeded):
     db.save_horse_pedigree_tree(seeded, X, [Cell("f", "B"), Cell("m", OLD_DAM)])
     rows = seeded.execute("SELECT source, COUNT(*) FROM horse_ancestors WHERE horse_id = ? GROUP BY 1", (X,)).fetchall()
     assert [tuple(r) for r in rows] == [("netkeiba", 2)]
+
+
+def test_recent_horses_without_bloodline_skips_old_and_local(seeded):
+    """refresh で取りに行くのは、最近の馬で血統表が1マスも無い馬だけ。"""
+    bl.rebuild(seeded)                                   # X に local の行が入る
+    ts = db.now_str()
+    new_runner, new_entry, old_runner = "2024100001", "2024100002", "1990100001"
+    for horse_id in (new_runner, new_entry, old_runner):
+        seeded.execute("INSERT INTO horses (horse_id, horse_name, updated_at) VALUES (?, ?, ?)",
+                       (horse_id, horse_id, ts))
+    seeded.execute("INSERT INTO races (race_id, race_date, venue_code, kaiji, nichime, race_no, fetched_at, updated_at) "
+                   "VALUES ('202606010101', '2026-06-01', '06', 1, 1, 1, ?, ?)", (ts, ts))
+    for umaban, horse_id in enumerate((Y, X, new_runner), start=1):
+        seeded.execute("INSERT INTO entries (race_id, umaban, horse_id) VALUES ('202606010101', ?, ?)",
+                       (umaban, horse_id))
+    seeded.execute("INSERT INTO entries (race_id, umaban, horse_id) VALUES ('200506010101', 3, ?)", (old_runner,))
+    seeded.execute("INSERT INTO upcoming_races (race_id, race_date, venue_code, entry_status, fetched_at, updated_at) "
+                   "VALUES ('202606050101', '2026-11-01', '06', 'registered', ?, ?)", (ts, ts))
+    seeded.execute("INSERT INTO upcoming_entries (race_id, seq, horse_id) VALUES ('202606050101', 1, ?)", (new_entry,))
+
+    assert [h["horse_id"] for h in db.recent_horses_without_bloodline(seeded)] == [new_entry, new_runner]
+    assert [h["horse_id"] for h in db.recent_horses_without_bloodline(seeded, limit=1)] == [new_entry]
+    # 出走した馬4頭（Y・X・新馬・古い馬）のうち、どちらかの血統表があるのは Y と X
+    assert db.count_any_bloodline(seeded) == (2, 4)
