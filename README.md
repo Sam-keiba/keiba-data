@@ -29,4 +29,10 @@ uv run keiba-data trainer-stalls-import data/trainer_stalls/2026-03-04.csv   # �
 貸付馬房数のCSVは `effective_date,stable,name,stalls`（1行1調教師・UTF-8）。JRAの発表PDFはスキャン画像なので、
 読み取ったものを確かめてから入れる。結びつかない名前は取り込まずに一覧で出る。
 
+いつもの更新は keiba フォルダ直下から `./refresh` でも流せる。直下にリンクを置いておく（最初の1回だけ）:
+
+```bash
+cd ~/Desktop/keiba && ln -s keiba-data/refresh refresh
+```
+
 詳しくは `uv run keiba-data --help` を参照。

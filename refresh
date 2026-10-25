@@ -1,0 +1,6 @@
+#!/bin/sh
+# いつもの更新（update → entries → baba → bloodline --new → publish）を流す。
+# keiba フォルダ直下にシンボリックリンクを置けば、そこから ./refresh で流せる（README参照）。
+# 例: ./refresh / ./refresh --no-upload
+here="$(dirname "$(readlink -f "$0")")"
+exec uv run --project "$here" keiba-data refresh "$@"
