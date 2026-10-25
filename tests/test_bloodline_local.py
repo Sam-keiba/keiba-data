@@ -104,3 +104,18 @@ def test_recent_horses_without_bloodline_skips_old_and_local(seeded):
     assert [h["horse_id"] for h in db.recent_horses_without_bloodline(seeded, limit=1)] == [new_entry]
     # 出走した馬4頭（Y・X・新馬・古い馬）のうち、どちらかの血統表があるのは Y と X
     assert db.count_any_bloodline(seeded) == (2, 4)
+
+
+def test_count_recent_bloodline(seeded):
+    """status の数え方: 最近の馬だけ。local の行も「ある」に数える。"""
+    bl.rebuild(seeded)
+    ts = db.now_str()
+    seeded.execute("INSERT INTO horses (horse_id, horse_name, sire, updated_at) VALUES ('2024100001', 'シンバ', 'エー', ?)",
+                   (ts,))
+    seeded.execute("INSERT INTO races (race_id, race_date, venue_code, kaiji, nichime, race_no, fetched_at, updated_at) "
+                   "VALUES ('202606010101', '2026-06-01', '06', 1, 1, 1, ?, ?)", (ts, ts))
+    for umaban, horse_id in enumerate((X, "2024100001"), start=1):
+        seeded.execute("INSERT INTO entries (race_id, umaban, horse_id) VALUES ('202606010101', ?, ?)",
+                       (umaban, horse_id))
+    # 最近走ったのは X（local の行あり・父なし）と新馬（父あり・血統表なし）。Y は2005年のレースだけ
+    assert db.count_recent_bloodline(seeded) == {"total": 2, "sire": 1, "tree": 1}

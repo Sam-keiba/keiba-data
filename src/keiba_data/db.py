@@ -1334,6 +1334,12 @@ def horses_without_bloodline(conn: sqlite3.Connection, limit: int | None = None)
     return [dict(r) for r in conn.execute(sql)]
 
 
+# 「最近の馬」＝ since 以降に走った馬と、出馬表に入っている馬（h は horses の別名、? は since）
+_RECENT_HORSE = """(EXISTS (SELECT 1 FROM entries e JOIN races r ON r.race_id = e.race_id
+                     WHERE e.horse_id = h.horse_id AND r.race_date >= ?)
+            OR EXISTS (SELECT 1 FROM upcoming_entries u WHERE u.horse_id = h.horse_id))"""
+
+
 def recent_horses_without_bloodline(conn: sqlite3.Connection, since: str = "2023-01-01",
                                     limit: int | None = None) -> list[dict]:
     """最近の馬で、5代血統表が**1マスも無い**馬（`keiba-data bloodline --new` / `refresh` の対象）。
@@ -1343,18 +1349,32 @@ def recent_horses_without_bloodline(conn: sqlite3.Connection, since: str = "2023
     （Target の horse_data から組めている馬を、わざわざ netkeiba に取りに行かない）。
     残るのは、Target を書き出した後にデビューした新馬などで、毎週の更新で数分ぶんにしかならない。
     """
-    sql = """
+    sql = f"""
         SELECT h.horse_id, h.horse_name
           FROM horses h
-         WHERE (EXISTS (SELECT 1 FROM entries e JOIN races r ON r.race_id = e.race_id
-                         WHERE e.horse_id = h.horse_id AND r.race_date >= ?)
-                OR EXISTS (SELECT 1 FROM upcoming_entries u WHERE u.horse_id = h.horse_id))
+         WHERE {_RECENT_HORSE}
            AND NOT EXISTS (SELECT 1 FROM horse_ancestors a WHERE a.horse_id = h.horse_id)
       ORDER BY h.horse_id DESC
     """
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
     return [dict(r) for r in conn.execute(sql, (since,))]
+
+
+def count_recent_bloodline(conn: sqlite3.Connection, since: str = "2023-01-01") -> dict[str, int]:
+    """最近の馬の {total: 頭数, sire: 父が入っている頭数, tree: 5代血統表がある頭数}。
+
+    5代血統表は netkeiba か手元で組んだもののどちらかがあれば数える。`status` の表示に使う。
+    """
+    row = conn.execute(f"""
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN h.sire IS NOT NULL AND h.sire <> '' THEN 1 ELSE 0 END) AS sire,
+               SUM(CASE WHEN EXISTS (SELECT 1 FROM horse_ancestors a WHERE a.horse_id = h.horse_id)
+                   THEN 1 ELSE 0 END) AS tree
+          FROM horses h
+         WHERE {_RECENT_HORSE}
+    """, (since,)).fetchone()
+    return {key: row[key] or 0 for key in ("total", "sire", "tree")}
 
 
 def count_any_bloodline(conn: sqlite3.Connection) -> tuple[int, int]:

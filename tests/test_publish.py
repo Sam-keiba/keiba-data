@@ -91,9 +91,9 @@ def test_publish_can_stop_before_uploading(filled, tmp_path, monkeypatch):
     """`--no-upload` はファイルを作るだけ（ネットに出ない）。"""
     called = []
     monkeypatch.setattr(publish, "upload", lambda *a, **k: called.append(a) or True)
-    path = publish.publish(db_path=filled, out_dir=tmp_path / "dist", do_upload=False)
+    path, uploaded = publish.publish(db_path=filled, out_dir=tmp_path / "dist", do_upload=False)
     assert path.name == publish.ASSET_NAME and path.exists()
-    assert called == []
+    assert called == [] and uploaded is False
 
 
 def test_publish_uploads_the_compressed_file(filled, tmp_path, monkeypatch):
@@ -104,7 +104,8 @@ def test_publish_uploads_the_compressed_file(filled, tmp_path, monkeypatch):
         return True
 
     monkeypatch.setattr(publish, "upload", fake_upload)
-    publish.publish(db_path=filled, out_dir=tmp_path / "dist", repo="me/repo")
+    _, uploaded = publish.publish(db_path=filled, out_dir=tmp_path / "dist", repo="me/repo")
+    assert uploaded is True
     assert seen["path"].name == publish.ASSET_NAME
     assert (seen["repo"], seen["tag"]) == ("me/repo", "db")
 

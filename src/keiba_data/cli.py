@@ -25,6 +25,7 @@ keiba-data を読み取り専用で利用する。
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import subprocess
 import sys
@@ -283,12 +284,16 @@ def _fetch_cushion(conn, session: PoliteSession, args: argparse.Namespace) -> No
 
 def _publish(args: argparse.Namespace) -> int:
     """閲覧用DBを作って、クラウド版が読むリリースへ置く。"""
-    path = publish_module.publish(
+    path, uploaded = publish_module.publish(
         repo=args.repo, do_upload=not args.no_upload,
     )
     print(f"閲覧用DB: {path}（{path.stat().st_size / 1e6:.1f}MB）")
     if args.no_upload:
         print("上げていません。上げるときは --no-upload を外して実行してください。")
+        return EXIT_OK
+    if not uploaded:
+        print("上げられませんでした（上のログを見てください）。クラウド版は前のDBのままです。")
+        return EXIT_FAILED
     return EXIT_OK
 
 
@@ -305,17 +310,87 @@ def _refresh(args: argparse.Namespace) -> int:
     publish = ["--no-upload"] if args.no_upload else []
     steps = (["update", *fetch], ["entries", *fetch], ["baba", *fetch],
              ["bloodline", "--new", *fetch], ["publish", *publish])
+    conn = db.connect(config.DB_PATH)
+    first_run_id = conn.execute("SELECT COALESCE(MAX(run_id), 0) FROM runs").fetchone()[0] + 1
+    conn.close()
+    codes: dict[str, int] = {}
+    result = EXIT_OK
     for argv in steps:
         step = build_parser().parse_args(argv)
         step.raw_args = " ".join(argv)
-        code = step.func(step)
+        code = codes[argv[0]] = step.func(step)
         if code != EXIT_OK and argv[0] == "baba" and code != EXIT_INTERRUPTED:
             logger.warning("クッション値は取れませんでした（終了コード%d）。発表後にスマホの更新マークで取れます。", code)
             continue
         if code != EXIT_OK:
             logger.error("%s で止まりました（終了コード%d）。ここから先は流していません。", argv[0], code)
-            return code
-    return EXIT_OK
+            result = code
+            break
+    _refresh_summary(first_run_id, codes, no_upload=args.no_upload, stopped=result != EXIT_OK)
+    return result
+
+
+REFRESH_LABELS = {"update": "結果", "entries": "出馬表", "baba": "クッション値",
+                  "bloodline": "血統表", "publish": "閲覧用DB"}
+RUN_STATUS_LABELS = {"failed": "失敗", "aborted": "アクセスを止められて中断", "interrupted": "中断"}
+
+
+def _refresh_summary(first_run_id: int, codes: dict[str, int], *, no_upload: bool, stopped: bool) -> None:
+    """refresh の最後に、手順ごとの結果を数行にまとめてログに出し、Macにも通知する。
+
+    初回は1時間ほどかかるので、ログを遡らなくても何が入ったか分かるようにする。
+    件数は実行履歴（runs）の、この refresh で増えた行から読む。
+    """
+    conn = db.connect(config.DB_PATH)
+    try:
+        runs = {r["command"]: r for r in conn.execute(
+            "SELECT command, status, n_races_saved, n_warnings FROM runs WHERE run_id >= ? ORDER BY run_id",
+            (first_run_id,))}
+        lines = []
+        for command, label in REFRESH_LABELS.items():
+            if command not in codes:
+                lines.append((label, "流していません"))
+                continue
+            run = runs.get(command) or {"status": "failed", "n_races_saved": 0, "n_warnings": 0}
+            failed = codes[command] != EXIT_OK
+            if command == "update":
+                text = f"{run['n_races_saved']:,}件" + (f"・警告{run['n_warnings']}件" if run["n_warnings"] else "")
+            elif command == "entries":
+                text = f"{run['n_races_saved']:,}レース"
+            elif command == "baba":
+                text = _today_cushion_text(conn)
+            elif command == "bloodline":
+                left = len(db.recent_horses_without_bloodline(conn))
+                text = f"+{run['n_races_saved']:,}頭" + (f"（残り{left:,}頭は次の refresh で）" if left else "")
+            else:
+                text = "作っただけ（上げていません）" if no_upload else "上げました"
+            if failed and command == "publish":
+                text = "上げられませんでした"
+            elif failed and command == "baba":
+                text = "取れませんでした（スマホの更新マークで取れます）"
+            elif failed:
+                text = f"{RUN_STATUS_LABELS.get(run['status'], run['status'])}（{text}）"
+            lines.append((label, text))
+    finally:
+        conn.close()
+    title = "refresh 途中で止まりました" if stopped else "refresh 完了"
+    logger.info("%s", title)
+    for label, text in lines:
+        logger.info("  %-6s %s", label, text)
+    _mac_notify(title, " / ".join(f"{label} {text}" for label, text in lines if text != "流していません"))
+
+
+def _today_cushion_text(conn) -> str:
+    """今日以降に発表されたクッション値を競馬場ごとに（例「東京 9.8、京都 10.1」）。"""
+    rows = conn.execute(
+        "SELECT v.venue_name, t.cushion_value FROM track_conditions t JOIN venues v USING (venue_code) "
+        " WHERE t.date = (SELECT MAX(date) FROM track_conditions WHERE date >= ? AND cushion_value IS NOT NULL) "
+        "   AND t.cushion_value IS NOT NULL ORDER BY t.venue_code",
+        (date.today().isoformat(),),
+    ).fetchall()
+    if not rows:
+        return "まだ発表なし（スマホの更新マークで取れます）"
+    return "、".join(f"{r['venue_name']} {r['cushion_value']:.1f}" for r in rows)
 
 
 def _target_import(args: argparse.Namespace) -> int:
@@ -515,13 +590,16 @@ def _notify(command: str, status: str, saved: int, conn) -> None:
         detail += f"／{done:,}/{total:,}頭 済み"
         detail += "（完了）" if not remaining else f"（残り{remaining:,}頭）"
     label = {"paused": "上限に達して一時停止", "success": "完了"}.get(status, status)
-    message = f"{command} {label}: {detail}"
+    _mac_notify("keiba", f"{command} {label}: {detail}")
+
+
+def _mac_notify(title: str, message: str) -> None:
+    """macOSの通知を出す。出せない環境（macOS以外など）では黙って何もしない。"""
+    # AppleScript の文字列は "…" で、\" と \\ のエスケープが効く（日本語はそのまま渡す）
+    message, title = (json.dumps(text, ensure_ascii=False) for text in (message, title))
+    script = f'display notification {message} with title {title} sound name "Glass"'
     try:
-        subprocess.run(
-            ["osascript", "-e",
-             f'display notification {message!r} with title "keiba" sound name "Glass"'],
-            check=False, capture_output=True, timeout=10,
-        )
+        subprocess.run(["osascript", "-e", script], check=False, capture_output=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         pass          # 通知が出せなくても取り込みの結果には関係ない
 
@@ -535,39 +613,31 @@ def _bar(done: int, total: int, width: int = 24) -> str:
 
 
 def _print_backfill_progress(conn) -> None:
-    """血統（pedigree）と5代血統表（bloodline）の進み具合。
+    """血統の揃い具合。**最近の馬（2023年以降に走った馬・出馬表の馬）**で足りないものだけを出す。
 
-    どちらも全部で20時間以上かかるので、**いつでも残りが分かる**ようにしておく。
-    残りリクエスト数から、3秒間隔での見込み時間も出す。
+    全期間で数えると1990年代の馬（Targetにも無い）まで「残り」に入り、何十時間もかかるように
+    見えてしまうので、全体は1行の数字だけにする。5代血統表の残りは3秒間隔での見込み時間も出す。
     """
-    jobs = (
-        ("血統（父・母・馬主・生産牧場）", db.count_pedigree(conn), "keiba-data pedigree"),
-        ("5代血統表（netkeibaから取ったもの）", db.count_bloodline(conn), "keiba-data bloodline"),
-    )
-    print("取り込みの進み具合:")
-    for label, (done, total), command in jobs:
-        remaining = max(total - done, 0)
+    recent = db.count_recent_bloodline(conn)
+    total = recent["total"]
+    print("血統（2023年以降に走った馬・出馬表の馬）:")
+    for label, done in (("父・母・母の父", recent["sire"]), ("5代血統表", recent["tree"])):
+        missing = total - done
         percent = (done / total * 100) if total else 0.0
-        hours = remaining * config.REQUEST_INTERVAL_SEC / 3600
-        left = "完了" if not remaining else f"残り{remaining:,}頭（約{hours:.1f}時間）"
-        print(f"  {label:<26} [{_bar(done, total)}] {done:>6,}/{total:,} ({percent:4.1f}%) {left}")
-        if remaining:
-            print(f"  {'':<26}  続き: uv run {command} --max-requests 5000")
+        if not missing:
+            left = "揃っています"
+        elif label == "5代血統表":
+            minutes = missing * config.REQUEST_INTERVAL_SEC / 60
+            left = f"無いのは{missing:,}頭（約{minutes:.0f}分）。次の refresh で埋まります"
+        else:
+            left = f"無いのは{missing:,}頭"
+        print(f"  {label:<10} [{_bar(done, total)}] {done:>6,}/{total:,} ({percent:4.1f}%) {left}")
+    # 全期間の残りは大半が1990年代の馬（Targetにも無い）で、取らなくても困らないので数字だけ
+    any_done, all_total = db.count_any_bloodline(conn)
+    netkeiba, _ = db.count_bloodline(conn)
     local, avg_cells = db.count_local_bloodline(conn)
-    if local:
-        print(f"  {'5代血統表（手元のデータで組んだもの）':<26} {local:,}頭 平均{avg_cells:.1f}/62マス"
-              "（作り直し: uv run keiba-data bloodline-local）")
-    # netkeiba の残りは大半が1990年代の馬で、取らなくても困らない。見るべきはこちら
-    done, total = db.count_any_bloodline(conn)
-    percent = (done / total * 100) if total else 0.0
-    print(f"  {'5代血統表（どちらかがある馬）':<26} [{_bar(done, total)}] {done:>6,}/{total:,} ({percent:4.1f}%)")
-    recent = len(db.recent_horses_without_bloodline(conn))
-    if recent:
-        minutes = recent * config.REQUEST_INTERVAL_SEC / 60
-        print(f"  {'':<26}  2023年以降に走った馬・出馬表の馬で無いのは{recent:,}頭（約{minutes:.0f}分）"
-              "。次の refresh か uv run keiba-data bloodline --new で埋まります")
-    else:
-        print(f"  {'':<26}  2023年以降に走った馬・出馬表の馬はすべて揃っています")
+    print(f"  全体（1995年〜）: {any_done:,}/{all_total:,}頭"
+          f"（netkeiba {netkeiba:,}頭・手元で組んだもの {local:,}頭 平均{avg_cells:.1f}/62マス）")
 
 
 def build_parser() -> argparse.ArgumentParser:

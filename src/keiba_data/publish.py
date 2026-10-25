@@ -102,8 +102,8 @@ def upload(path: Path, repo: str, tag: str = RELEASE_TAG) -> bool:
 def publish(
     db_path: Path | None = None, out_dir: Path | None = None,
     repo: str | None = None, do_upload: bool = True,
-) -> Path:
-    """閲覧用DBを作って（必要なら）リリースへ上げる。作ったファイルを返す。"""
+) -> tuple[Path, bool]:
+    """閲覧用DBを作って（必要なら）リリースへ上げる。(作ったファイル, 上げられたか) を返す。"""
     db_path = Path(db_path or config.DB_PATH)
     out_dir = Path(out_dir or config.DATA_ROOT / "dist")
     repo = repo or config.PUBLISH_REPO
@@ -115,7 +115,8 @@ def publish(
         db_path.stat().st_size / 1e6, viewer.stat().st_size / 1e6,
         packed.stat().st_size / 1e6, packed,
     )
-    if do_upload and upload(packed, repo):
+    uploaded = do_upload and upload(packed, repo)
+    if uploaded:
         logger.info("リリース %s に %s を置きました（%s）", RELEASE_TAG, ASSET_NAME, repo)
         logger.info("クラウド版は、次に開いたときに自動で取り込みます。")
-    return packed
+    return packed, uploaded
