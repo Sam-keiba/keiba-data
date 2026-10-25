@@ -41,6 +41,9 @@ RESULT_GRACE_DAYS = 3
 UPDATE_OVERLAP_DAYS = 7
 # updateがさかのぼる最大日数（これより古い分はbackfillの担当）
 UPDATE_MAX_LOOKBACK_DAYS = 60
+# netkeibaのdbページは当日・前日の結果をまだ載せないので、updateはその2日を取りに行かない
+# （行っても空のページで「構造が変わったかも」の警告が出るだけ。その2日は `jra` の担当）
+UPDATE_SKIP_RECENT_DAYS = 2
 
 SAVED, UNAVAILABLE, ERROR = "saved", "unavailable", "error"
 
@@ -236,7 +239,7 @@ class Updater:
     # --- コマンド ---------------------------------------------------------------
 
     def run_update(self) -> None:
-        """前回までの続きから今日までを取得する。
+        """前回までの続きから一昨日までを取得する（当日・前日は netkeiba にまだ無いので飛ばす）。
 
         開始日は「DBの最新開催日の7日前」（途中で実行した日の取りこぼし対策）。ただし
         最大60日前まで（それより古い分はbackfillで取る）。DBが空なら14日前から。
@@ -254,8 +257,11 @@ class Updater:
                     latest, UPDATE_MAX_LOOKBACK_DAYS, floor,
                 )
                 start = floor
-        logger.info("update: 対象期間 %s 〜 %s", start, self.today)
-        self._run_range(start, self.today)
+        end = self.today - timedelta(days=UPDATE_SKIP_RECENT_DAYS)
+        logger.info("update: 対象期間 %s 〜 %s（当日・前日の結果は netkeiba にまだ無いので取りに行きません）",
+                    start, end)
+        if start <= end:
+            self._run_range(start, end)
         # 連休開催などで JRA結果の取り込み窓（当日・前日）を外れたレースのリンクを埋める。
         # リンクが入っていない開催だけを回るので、揃っていれば何もしない。
         self.fetch_jra_race_links(start, self.today)

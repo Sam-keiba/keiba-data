@@ -1,5 +1,5 @@
 import re
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -123,7 +123,7 @@ def test_unavailable_result_on_race_day_is_not_completed(conn, store, monkeypatc
     monkeypatch.setattr(updater, "fetch_jra_race_links", lambda *a, **k: 0)
     updater.sync_calendar(DAY, DAY)
     _only_day_13(conn)
-    updater.run_update()
+    updater._run_range(DAY, DAY)       # update は当日を飛ばすので、日を直接流す
 
     assert db.table_counts(conn)["races"] == 23
     assert updater.n_warnings == 0  # 当日は結果未掲載でも警告にしない
@@ -134,6 +134,22 @@ def test_unavailable_result_on_race_day_is_not_completed(conn, store, monkeypatc
     Updater(conn, client, store, today=TODAY).run_update()
     assert db.table_counts(conn)["races"] == 24
     assert [u for u in client.urls if "db.netkeiba.com" in u] == [config.RACE_RESULT_URL.format(race_id="202609040412")]
+
+
+def test_update_skips_today_and_yesterday(conn, store, monkeypatch):
+    """当日・前日は netkeiba に結果がまだ無いので、update は取りに行かない（翌週に取る）。"""
+    for today in (DAY, DAY + timedelta(days=1)):
+        client = FakeClient()
+        updater = Updater(conn, client, store, today=today)
+        monkeypatch.setattr(updater, "fetch_jra_race_links", lambda *a, **k: 0)
+        updater.sync_calendar(DAY, DAY)
+        _only_day_13(conn)
+        updater.run_update()
+        assert [u for u in client.urls if "db.netkeiba.com/race/" in u] == []
+        assert updater.n_warnings == 0
+
+    Updater(conn, FakeClient(), store, today=DAY + timedelta(days=2)).run_update()
+    assert db.table_counts(conn)["races"] == 24
 
 
 def test_structure_change_is_warned_and_logged(conn, store):
