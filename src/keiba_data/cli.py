@@ -1,5 +1,6 @@
 """CLIエントリポイント。
 
+  uv run keiba-data refresh                       update → entries → publish をまとめて実行（いつもの更新）
   uv run keiba-data update                        前回の続き〜今日のレース結果を取得（週末のレース後に実行）
   uv run keiba-data backfill --from 2023-01-01    過去レースをさかのぼって取得（何回かに分けて実行）
   uv run keiba-data reparse                       保存済みHTMLからDBを作り直す（ネットにアクセスしない）
@@ -290,6 +291,23 @@ def _publish(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _refresh(args: argparse.Namespace) -> int:
+    """いつもの更新: update → entries → publish を順に流す。
+
+    どれかが失敗・中断したら、そこで止めて上げない（半端なDBをクラウドに出さない）。
+    """
+    fetch = ["--interval", str(args.interval)]
+    publish = ["--no-upload"] if args.no_upload else []
+    for argv in (["update", *fetch], ["entries", *fetch], ["publish", *publish]):
+        step = build_parser().parse_args(argv)
+        step.raw_args = " ".join(argv)
+        code = step.func(step)
+        if code != EXIT_OK:
+            logger.error("%s で止まりました（終了コード%d）。ここから先は流していません。", argv[0], code)
+            return code
+    return EXIT_OK
+
+
 def _target_import(args: argparse.Namespace) -> int:
     """Targetから書き出したCSVを取り込み、本体（races/entries/results/horses…）へ写す。
 
@@ -542,6 +560,14 @@ def build_parser() -> argparse.ArgumentParser:
             "--notify", action="store_true",
             help="終わったらmacOSの通知を出す（血統の取り込みなど、何時間もかかるとき用）",
         )
+
+    p_refresh = sub.add_parser("refresh", help="update → entries → publish をまとめて実行する（いつもの更新）")
+    p_refresh.add_argument(
+        "--interval", type=float, default=config.REQUEST_INTERVAL_SEC,
+        help=f"リクエスト間隔(秒)。デフォルト{config.REQUEST_INTERVAL_SEC}",
+    )
+    p_refresh.add_argument("--no-upload", action="store_true", help="閲覧用DBを作るだけで上げない")
+    p_refresh.set_defaults(func=_refresh)
 
     p_update = sub.add_parser("update", help="前回の続きから今日までのレース結果を取得する")
     add_fetch_options(p_update)
