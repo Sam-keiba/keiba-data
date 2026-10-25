@@ -1,6 +1,6 @@
 """CLIエントリポイント。
 
-  uv run keiba-data refresh                       update → entries → bloodline --new → publish をまとめて実行（いつもの更新）
+  uv run keiba-data refresh                       update → entries → baba → bloodline --new → publish をまとめて実行（いつもの更新）
   uv run keiba-data update                        前回の続き〜今日のレース結果を取得（週末のレース後に実行）
   uv run keiba-data backfill --from 2023-01-01    過去レースをさかのぼって取得（何回かに分けて実行）
   uv run keiba-data reparse                       保存済みHTMLからDBを作り直す（ネットにアクセスしない）
@@ -293,19 +293,25 @@ def _publish(args: argparse.Namespace) -> int:
 
 
 def _refresh(args: argparse.Namespace) -> int:
-    """いつもの更新: update → entries → bloodline --new → publish を順に流す。
+    """いつもの更新: update → entries → baba → bloodline --new → publish を順に流す。
 
     どれかが失敗・中断したら、そこで止めて上げない（半端なDBをクラウドに出さない）。
+    ただし baba（クッション値）だけは失敗しても先へ進む。発表前に流すこともあり、
+    その日の値はあとからスマホの更新マークで取り直せるので、結果・出馬表を上げない理由にならない。
     血統表がリクエスト上限に当たったときは一時停止（成功扱い）なので、そのまま上げる。
     残りは次の refresh で続きから取る。
     """
     fetch = ["--interval", str(args.interval)]
     publish = ["--no-upload"] if args.no_upload else []
-    steps = (["update", *fetch], ["entries", *fetch], ["bloodline", "--new", *fetch], ["publish", *publish])
+    steps = (["update", *fetch], ["entries", *fetch], ["baba", *fetch],
+             ["bloodline", "--new", *fetch], ["publish", *publish])
     for argv in steps:
         step = build_parser().parse_args(argv)
         step.raw_args = " ".join(argv)
         code = step.func(step)
+        if code != EXIT_OK and argv[0] == "baba" and code != EXIT_INTERRUPTED:
+            logger.warning("クッション値は取れませんでした（終了コード%d）。発表後にスマホの更新マークで取れます。", code)
+            continue
         if code != EXIT_OK:
             logger.error("%s で止まりました（終了コード%d）。ここから先は流していません。", argv[0], code)
             return code
@@ -582,7 +588,7 @@ def build_parser() -> argparse.ArgumentParser:
             help="終わったらmacOSの通知を出す（血統の取り込みなど、何時間もかかるとき用）",
         )
 
-    p_refresh = sub.add_parser("refresh", help="update → entries → bloodline --new → publish をまとめて実行する（いつもの更新）")
+    p_refresh = sub.add_parser("refresh", help="update → entries → baba → bloodline --new → publish をまとめて実行する（いつもの更新）")
     p_refresh.add_argument(
         "--interval", type=float, default=config.REQUEST_INTERVAL_SEC,
         help=f"リクエスト間隔(秒)。デフォルト{config.REQUEST_INTERVAL_SEC}",

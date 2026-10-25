@@ -16,7 +16,7 @@ uv run pytest
 ## CLI
 
 ```bash
-uv run keiba-data refresh       # いつもの更新: update → entries → bloodline --new → publish をまとめて実行
+uv run keiba-data refresh       # いつもの更新: update → entries → baba → bloodline --new → publish をまとめて実行
 uv run keiba-data update        # 前回の続き〜今日のレース結果を取得
 uv run keiba-data backfill --from 2023-01-01
 uv run keiba-data status
