@@ -47,6 +47,7 @@ from keiba_data.updater import Updater
 logger = logging.getLogger("keiba")
 
 EXIT_OK, EXIT_FAILED, EXIT_BLOCKED, EXIT_INTERRUPTED = 0, 1, 2, 130
+ANALYSIS_CACHE_TIMEOUT_SEC = 15 * 60
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -345,7 +346,30 @@ def _refresh_steps(args: argparse.Namespace) -> int:
     _refresh_summary(first_run_id, codes, no_upload=args.no_upload, stopped=result != EXIT_OK)
     if result == EXIT_OK and not args.no_upload:
         _record_refresh(args.raw_args)
+    if result == EXIT_OK:
+        _build_analysis_cache()
     return result
+
+
+def _build_analysis_cache() -> None:
+    """隣の keiba-app があれば、競馬分析の事前集計を作る。
+
+    keiba-data は keiba-app に依存できないので別プロセスで流す。分析の都合で更新を失敗にしない
+    （作れなくても、次にアプリを開いたときに作り直される）。
+    """
+    project = config.PROJECT_ROOT.parent / "keiba-app"
+    if not (project / "pyproject.toml").exists():
+        return
+    logger.info("競馬分析の集計を作っています…")
+    try:
+        done = subprocess.run(["uv", "run", "--project", str(project), "keiba-app", "build-cache"],
+                              timeout=ANALYSIS_CACHE_TIMEOUT_SEC, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning("競馬分析の集計を作れませんでした: %s。次にアプリを開いたときに作り直します。", error)
+        return
+    if done.returncode != 0:
+        logger.warning("競馬分析の集計を作れませんでした（終了コード%d）。次にアプリを開いたときに作り直します。",
+                       done.returncode)
 
 
 def _record_refresh(raw_args: str) -> None:
