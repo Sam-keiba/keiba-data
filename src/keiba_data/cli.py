@@ -1,6 +1,7 @@
 """CLIエントリポイント。
 
   uv run keiba-data refresh                       update → entries → baba → bloodline --new → publish をまとめて実行（いつもの更新）
+  uv run keiba-data auto                          更新が要る日だけ refresh を流す（Macの予約実行から呼ばれる）
   uv run keiba-data update                        前回の続き〜今日のレース結果を取得（週末のレース後に実行）
   uv run keiba-data backfill --from 2023-01-01    過去レースをさかのぼって取得（何回かに分けて実行）
   uv run keiba-data reparse                       保存済みHTMLからDBを作り直す（ネットにアクセスしない）
@@ -25,15 +26,18 @@ keiba-data を読み取り専用で利用する。
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import logging
+import socket
 import subprocess
 import sys
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from keiba_data import (
-    bloodline_local, config, cushion, db, publish as publish_module, sire_keys, target_import, trainer_stalls,
+    auto, bloodline_local, config, cushion, db, publish as publish_module, sire_keys, target_import, trainer_stalls,
 )
 from keiba_data.html_store import HtmlStore
 from keiba_data.http import BlockedError, PoliteSession, RequestBudgetExceeded
@@ -298,6 +302,18 @@ def _publish(args: argparse.Namespace) -> int:
 
 
 def _refresh(args: argparse.Namespace) -> int:
+    """同時に2つ流れないように鍵を取ってから refresh を流す（予約実行と手動が重なったとき用）。"""
+    config.DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    with (config.DATA_ROOT / ".refresh.lock").open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            logger.error("別の refresh が実行中なので、今回は流しません。")
+            return EXIT_FAILED
+        return _refresh_steps(args)
+
+
+def _refresh_steps(args: argparse.Namespace) -> int:
     """いつもの更新: update → entries → baba → bloodline --new → publish を順に流す。
 
     どれかが失敗・中断したら、そこで止めて上げない（半端なDBをクラウドに出さない）。
@@ -327,7 +343,79 @@ def _refresh(args: argparse.Namespace) -> int:
             result = code
             break
     _refresh_summary(first_run_id, codes, no_upload=args.no_upload, stopped=result != EXIT_OK)
+    if result == EXIT_OK and not args.no_upload:
+        _record_refresh(args.raw_args)
     return result
+
+
+def _record_refresh(raw_args: str) -> None:
+    """アップロードまで成功したことを実行履歴に残す（`auto` が次に更新するかの判定に使う）。"""
+    conn = db.connect(config.DB_PATH)
+    try:
+        db.finish_run(conn, db.start_run(conn, "refresh", raw_args), "success", 0, 0, 0)
+    finally:
+        conn.close()
+
+
+NETWORK_WAIT_TRIES = 5
+NETWORK_WAIT_SEC = 60
+
+
+def _wait_for_network() -> bool:
+    """Macが起きた直後はまだネットにつながっていないことがあるので、少し待つ。"""
+    for attempt in range(NETWORK_WAIT_TRIES):
+        try:
+            socket.create_connection((config.AUTO_NETWORK_CHECK_HOST, 443), timeout=10).close()
+            return True
+        except OSError:
+            if attempt + 1 < NETWORK_WAIT_TRIES:
+                time.sleep(NETWORK_WAIT_SEC)
+    return False
+
+
+def _auto_reason(conn, today: date, now: datetime) -> str | None:
+    """カレンダーを最新にしてから、いま更新が要るかを判定する。"""
+    updater = Updater(conn, PoliteSession(interval_sec=config.REQUEST_INTERVAL_SEC),
+                      HtmlStore(config.HTML_ROOT), today=today)
+    updater.sync_calendar(today, today + timedelta(days=1))
+    start, end = today - timedelta(days=auto.RESULT_LOOKBACK_DAYS), today + timedelta(days=7)
+    rows = conn.execute("SELECT kaisai_date, completed FROM kaisai_days WHERE kaisai_date BETWEEN ? AND ?",
+                        (start.isoformat(), end.isoformat())).fetchall()
+    last = conn.execute("SELECT MAX(started_at) AS at FROM runs WHERE command = 'refresh' AND status = 'success'"
+                        ).fetchone()["at"]
+    return auto.due_reason(
+        now,
+        [date.fromisoformat(r["kaisai_date"]) for r in rows],
+        [date.fromisoformat(r["kaisai_date"]) for r in rows if not r["completed"]],
+        datetime.fromisoformat(last) if last else None,
+    )
+
+
+def _auto(args: argparse.Namespace) -> int:
+    """予約実行の入口: 更新が要る日だけ refresh を流す。要らない日は黙って終わる。"""
+    if not _wait_for_network():
+        logger.error("ネットにつながらないので、今回の更新は流しませんでした。")
+        _mac_notify("keiba 自動更新", "ネットにつながらず流せませんでした。次の予約で取り直します")
+        return EXIT_FAILED
+    now = datetime.now()
+    conn = db.connect(config.DB_PATH)
+    try:
+        reason = _auto_reason(conn, now.date(), now)
+    except (BlockedError, OSError) as exc:
+        logger.error("更新が要るか確かめられませんでした: %s", exc)
+        _mac_notify("keiba 自動更新", "開催カレンダーを読めず流せませんでした。次の予約で取り直します")
+        return EXIT_BLOCKED if isinstance(exc, BlockedError) else EXIT_FAILED
+    finally:
+        conn.close()
+    if reason is None:
+        logger.info("auto: 今は更新の必要がありません。")
+        return EXIT_OK
+    logger.info("auto: %s のために更新します%s", reason, "（dry-run: 流しません）" if args.dry_run else "")
+    if args.dry_run:
+        return EXIT_OK
+    refresh = build_parser().parse_args(["refresh"])
+    refresh.raw_args = "auto"
+    return _refresh(refresh)
 
 
 REFRESH_LABELS = {"update": "結果", "entries": "出馬表", "baba": "クッション値",
@@ -665,6 +753,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_refresh.add_argument("--no-upload", action="store_true", help="閲覧用DBを作るだけで上げない")
     p_refresh.set_defaults(func=_refresh)
+
+    p_auto = sub.add_parser("auto", help="更新が要る日だけ refresh を流す（Macの予約実行から呼ばれる）")
+    p_auto.add_argument("--dry-run", action="store_true", help="更新するかの判定だけして、流さない")
+    p_auto.set_defaults(func=_auto)
 
     p_update = sub.add_parser("update", help="前回の続きから今日までのレース結果を取得する")
     add_fetch_options(p_update)

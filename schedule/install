@@ -1,0 +1,45 @@
+#!/bin/sh
+# 自動更新の予約をMacに登録する（毎日18時に判定。やめるときは ./schedule/uninstall）。
+#
+# macOSは、予約から直接起動したスクリプトに ~/Desktop を読ませない。そこで小さなアプリを
+# ~/Applications に作り、それ経由で起動する。許可はそのアプリのデスクトップフォルダだけで済む
+# （/bin/sh や uv にフルディスクアクセスを渡さなくてよい）。初回に確認画面が1回出る。
+set -eu
+here="$(cd "$(dirname "$0")" && pwd)"
+label="com.keiba.refresh"
+app="$HOME/Applications/Keiba Refresh.app"
+plist="$HOME/Library/LaunchAgents/$label.plist"
+log="$HOME/Library/Logs/keiba-refresh.log"
+path="$(dirname "$(command -v uv)"):$(dirname "$(command -v gh)"):/usr/bin:/bin:/usr/sbin:/sbin"
+mkdir -p "$HOME/Applications" "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+
+launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+rm -rf "$app"
+osacompile -o "$app" <<APPLESCRIPT
+try
+  do shell script "PATH='$path' '$here/run' >> '$log' 2>&1"
+on error
+  display notification "ログ: ~/Library/Logs/keiba-refresh.log" with title "keiba 自動更新でエラーが出ました" sound name "Glass"
+end try
+APPLESCRIPT
+# Dockにアイコンを出さない。Info.plistを変えると署名が外れるので付け直す
+/usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $label.app" "$app/Contents/Info.plist" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $label.app" "$app/Contents/Info.plist"
+codesign --force --deep --sign - "$app"
+
+cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key><array><string>/usr/bin/open</string><string>-g</string><string>$app</string></array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+  <key>RunAtLoad</key><true/>
+</dict>
+</plist>
+PLIST
+launchctl bootstrap "gui/$(id -u)" "$plist"
+echo "登録しました。デスクトップフォルダへのアクセスを聞かれたら「許可」を押してください。"
+echo "記録: $log"

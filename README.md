@@ -35,4 +35,16 @@ uv run keiba-data trainer-stalls-import data/trainer_stalls/2026-03-04.csv   # �
 cd ~/Desktop/keiba && ln -s keiba-data/refresh refresh
 ```
 
+## 自動更新
+
+```bash
+./schedule/install     # Macに予約を登録（最初の1回だけ。確認画面で「許可」を押す）
+./schedule/uninstall   # 予約を外す
+uv run keiba-data auto --dry-run   # いま更新が要るかだけ確かめる
+```
+
+毎日18時に判定し、**開催日の前日15時以降に未更新**か、**2日以上前の開催日の結果が揃っていない**ときだけ
+refresh を流して、閲覧用DBのアップロードまで行う。Macが閉じていて時刻を逃したら、次に開いたときに追いつく。
+結果はMacの通知で届く。記録は `~/Library/Logs/keiba-refresh.log` と `logs/`。
+
 詳しくは `uv run keiba-data --help` を参照。

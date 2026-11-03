@@ -1,0 +1,4 @@
+#!/bin/sh
+# Macの予約から呼ばれる入口。更新が要る日だけ refresh が流れる（keiba-data auto）。
+here="$(cd "$(dirname "$0")/.." && pwd)"
+exec caffeinate -i uv run --project "$here" keiba-data auto "$@"
